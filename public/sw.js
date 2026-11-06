@@ -1,6 +1,6 @@
 // HANA LOG Service Worker：オフライン起動用。
 // 画面はネット優先（更新をすぐ反映）、つながらない時は保存済みの版で起動する。
-const CACHE = 'hanalog-v1';
+const CACHE = 'hanalog-v2';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
