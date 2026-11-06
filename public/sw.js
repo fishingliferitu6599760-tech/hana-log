@@ -1,57 +1,34 @@
-const CACHE = "hana-log-v1";
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    (async () => {
-      const home = new URL("./", self.location).href;
-      const response = await fetch(home, { cache: "reload" });
-      if (!response.ok) throw new Error("App shell unavailable");
-      const html = await response.text();
-      const assets = [
-        ...html.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g),
-      ].map((m) => new URL(m[1], home).href);
-      const cache = await caches.open(CACHE);
-      await cache.addAll([
-        home,
-        ...assets,
-        "./icon.svg",
-        "./manifest.webmanifest",
-        "./icon-192.png",
-        "./icon-512.png",
-        "./apple-touch-icon.png",
-      ]);
-    })(),
+// HANA LOG Service Worker：オフライン起動用。
+// 画面はネット優先（更新をすぐ反映）、つながらない時は保存済みの版で起動する。
+const CACHE = 'hanalog-v1';
+const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
   );
 });
-self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    (async () => {
-      for (const key of await caches.keys())
-        if (key.startsWith("hana-log-") && key !== CACHE) await caches.delete(key);
-      await self.clients.claim();
-    })(),
-  );
-});
-self.addEventListener("fetch", (event) => {
-  if (
-    event.request.method !== "GET" ||
-    new URL(event.request.url).origin !== self.location.origin
-  )
-    return;
-  event.respondWith(
-    (async () => {
-      // 静的な同一オリジンのアプリシェルのみ。配信側の Vary: Origin に依存しない。
-      const cached = await caches.match(event.request, { ignoreVary: true });
-      if (cached) return cached;
-      try {
-        return await fetch(event.request);
-      } catch (error) {
-        if (event.request.mode === "navigate")
-          return (
-            (await caches.match(new URL("./", self.location).href)) ||
-            Response.error()
-          );
-        return Response.error();
-      }
-    })(),
+
+const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  e.respondWith(
+    Promise.race([fetch(req), timeout(3500)])
+      .then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() =>
+        caches.match(req, { ignoreSearch: true }).then((r) => r || (req.mode === 'navigate' ? caches.match('./index.html') : undefined)),
+      ),
   );
 });

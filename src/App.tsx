@@ -1,1486 +1,903 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  machine,
-  newSession,
-  parseBackup,
-  register,
-  share,
-  totals,
-  type Bonus,
-  type Data,
-  type Session,
-} from "./model";
-import { download, load, persist, StorageConflict } from "./storage";
-const fmt = (n: number) => n.toLocaleString("ja-JP");
-const colors: Record<string, string> = {
-  白: "#e6e7eb",
-  青: "#69a9ff",
-  黄: "#f5cc62",
-  緑: "#60ce9b",
-  赤: "#fa7379",
-  紫: "#b48bf2",
-  虹: "linear-gradient(110deg,#f87585,#f0d65d,#67d2b5,#9b8dff)",
+  DEFAULT_STORES, getMachine, LAMP_CSS, LAMP_EMOJI, LAMP_LABEL, LEND_RATES, MACHINES, MISS_EMOJI, type FieldSpec,
+} from './machines';
+import {
+  addBonus, aggregate, canAskGakkun, deleteBonus, endSession, exportBackup, hhmm, isComplete, isFreshMachine,
+  isResetFlashTarget, newSession, parseBackup, probText, reopenSession, setBonusType, setBellTotal, setMid, shareDetail, bellTail, diffText, bellTarget, setBonusBells,
+  shareSimple, specOf, timeline, updateBonus, type TimelineRow,
+} from './logic';
+import { buildSample } from './sample';
+import { loadState, saveState, type SaveStatus } from './storage';
+import { MISS, NA, type AppState, type Bonus, type BonusType, type LampColor, type LampValue, type Prefs, type Session } from './types';
+
+type SheetState =
+  | { kind: 'bonus'; id: string }
+  | { kind: 'setup'; mode: 'new' | 'edit' }
+  | { kind: 'invest' }
+  | { kind: 'share' }
+  | { kind: 'end' }
+  | { kind: 'menu' }
+  | null;
+
+interface Toast { text: string; undo: boolean; key: number }
+
+const parseNum = (v: string): number | null => {
+  const t = v.replace(/[^\d-]/g, '');
+  if (t === '' || t === '-') return null;
+  const n = parseInt(t, 10);
+  return isFinite(n) ? n : null;
 };
-function Icon({ name, size = 20 }: { name: string; size?: number }) {
-  const paths: Record<string, ReactNode> = {
-    plus: <path d="M12 5v14M5 12h14" />,
-    check: <path d="m5 12 4 4L19 6" />,
-    down: <path d="m6 9 6 6 6-6" />,
-    copy: (
-      <>
-        <rect x="8" y="8" width="12" height="13" rx="2" />
-        <path d="M16 8V3H3v13h5" />
-      </>
-    ),
-    clock: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3 2" />
-      </>
-    ),
-    bell: (
-      <>
-        <path d="M6 8a6 6 0 0 1 12 0c0 8 3 8 3 9H3c0-1 3-1 3-9M10 21h4" />
-      </>
-    ),
-    arrow: <path d="m9 5 7 7-7 7" />,
-    undo: (
-      <>
-        <path d="M4 10h10a6 6 0 0 1 0 12M4 10l5-5M4 10l5 5" />
-      </>
-    ),
-    close: <path d="m6 6 12 12M6 18 18 6" />,
-    wallet: (
-      <>
-        <rect x="3" y="5" width="18" height="15" rx="3" />
-        <path d="M3 8V5a2 2 0 0 1 2-2h12M21 11h-7v5h7M17 13.5h.01" />
-      </>
-    ),
-    save: (
-      <>
-        <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" />
-      </>
-    ),
-    list: (
-      <>
-        <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
-      </>
-    ),
-    chart: (
-      <>
-        <path d="M4 3v18h17M9 16v-5M14 16V7M19 16V4" />
-      </>
-    ),
-    flower: (
-      <>
-        <path d="M12 10C3 0 0 10 8 12-2 18 9 25 12 16c4 10 14 1 5-4 10-4 0-15-5-2Z" />
-        <circle cx="12" cy="12" r="2" />
-      </>
-    ),
-  };
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {paths[name] ?? paths.list}
-    </svg>
-  );
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 }
-function NumberField({
-  label,
-  value,
-  onChange,
-  nullable = false,
-  unit = "G",
-  min = 0,
-}: {
-  label: string;
-  value: number | null;
-  onChange: (v: number | null) => void;
-  nullable?: boolean;
-  unit?: string;
-  min?: number;
-}) {
-  const [raw, setRaw] = useState(value === null ? "" : String(value));
-  useEffect(() => setRaw(value === null ? "" : String(value)), [value]);
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <div className="input-unit">
-        <input
-          aria-label={label}
-          type="text"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          value={raw}
-          placeholder={nullable ? "未記録" : "0"}
-          onBlur={() => {
-            setRaw(value === null ? "" : String(value));
-          }}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (!/^\d*$/.test(v) || Number(v) > 100000000) return;
-            setRaw(v);
-            if (v === "") {
-              if (nullable) onChange(null);
-            } else if (Number(v) >= min) onChange(Number(v));
-          }}
-        />
-        <small>{unit}</small>
-      </div>
-    </label>
-  );
-}
-function Choices({
-  label,
-  values,
-  value,
-  onChange,
-}: {
-  label: string;
-  values: string[];
-  value: string | null;
-  onChange: (v: string | null) => void;
-}) {
-  return (
-    <div className="field">
-      <span>{label}</span>
-      <div className="choices">
-        <button
-          className={value === null ? "selected" : ""}
-          onClick={() => onChange(null)}
-        >
-          未記録
-        </button>
-        {values.map((c) => (
-          <button
-            className={value === c ? "selected" : ""}
-            key={c}
-            onClick={() => onChange(c)}
-          >
-            <i className="lamp" style={{ background: colors[c] }} />
-            {c}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-function Tri({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: boolean | null;
-  onChange: (v: boolean | null) => void;
-}) {
-  return (
-    <div className="field">
-      <span>{label}</span>
-      <div className="choices">
-        {([null, true, false] as const).map((v) => (
-          <button
-            className={value === v ? "selected" : ""}
-            key={String(v)}
-            onClick={() => onChange(v)}
-          >
-            {v === null ? "未記録" : v ? "あり" : "なし"}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-function Sheet({
-  title,
-  children,
-  close,
-}: {
-  title: string;
-  children: ReactNode;
-  close: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const before = document.activeElement as HTMLElement;
-    const old = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    ref.current?.focus();
-    return () => {
-      document.body.style.overflow = old;
-      before?.focus();
-    };
-  }, []);
-  return (
-    <div className="overlay" onClick={close}>
-      <div
-        ref={ref}
-        className="sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") close();
-          if (e.key === "Tab") {
-            const els = Array.from(
-              ref.current!.querySelectorAll<HTMLElement>(
-                'button,input,textarea,select,[tabindex="0"]',
-              ),
-            ).filter((x) => !x.hasAttribute("disabled"));
-            const first = els[0],
-              last = els[els.length - 1];
-            if (
-              e.shiftKey &&
-              (document.activeElement === first ||
-                document.activeElement === ref.current)
-            ) {
-              e.preventDefault();
-              last?.focus();
-            } else if (!e.shiftKey && document.activeElement === last) {
-              e.preventDefault();
-              first?.focus();
-            }
-          }
-        }}
-      >
-        <div className="handle" />
-        <div className="sheet-title">
-          <h2>{title}</h2>
-          <button className="icon-button" aria-label="閉じる" onClick={close}>
-            <Icon name="close" />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
+
+// =====================================================================
 export default function App() {
-  const [initial] = useState(load);
-  const [data, setData] = useState<Data>(initial.data);
-  const dataRef = useRef(data);
-  const [storageError, setStorageError] = useState(initial.error);
-  const [toast, setToast] = useState("");
-  const [sheet, setSheet] = useState<string | null>(null);
-  const [tab, setTab] = useState("record");
-  const [undo, setUndo] = useState<Data[]>([]);
-  const [online, setOnline] = useState(navigator.onLine);
-  const [swReady, setSwReady] = useState(false);
-  const [shareDetail, setShareDetail] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState<Session>(() => {
-    try {
-      const v = localStorage.getItem("hana-log:new-draft");
-      if (v) {
-        const s = JSON.parse(v);
-        const originalTotal = s.startTotal;
-        const checked = parseBackup(
-          JSON.stringify({
-            version: 1,
-            sessions: [
-              {
-                ...s,
-                startTotal: Math.max(s.startTotal, s.startGap),
-                currentGap: s.startGap,
-              },
-            ],
-            activeId: s.id,
-          }),
-        ).sessions[0];
-        return { ...checked, startTotal: originalTotal };
-      }
-    } catch {}
-    return newSession();
-  });
-  const s = data.sessions.find((s) => s.id === data.activeId);
-  const t = s ? totals(s) : null;
+  const [state, setState] = useState<AppState | null>(null);
+  const [saveVia, setSaveVia] = useState<SaveStatus>('none');
+  const [buf, setBuf] = useState('');
+  const [sheet, setSheet] = useState<SheetState>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [skipBell, setSkipBell] = useState<Set<string>>(new Set());
+  const stateRef = useRef<AppState | null>(null);
+  const undoRef = useRef<Array<{ state: AppState; label: string }>>([]);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const toastTimer = useRef<number>();
+
   useEffect(() => {
-    const off = () => setOnline(navigator.onLine);
-    window.addEventListener("online", off);
-    window.addEventListener("offline", off);
-    const fail = () =>
-      setToast("オフライン準備に失敗しました。通信環境を確認してください。");
-    window.addEventListener("offline-unavailable", fail);
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.ready.then(() => setSwReady(true));
-    }
-    return () => {
-      window.removeEventListener("online", off);
-      window.removeEventListener("offline", off);
-      window.removeEventListener("offline-unavailable", fail);
-    };
+    loadState().then(({ state: st, via }) => {
+      stateRef.current = st;
+      setState(st);
+      setSaveVia(via);
+      if (!st.activeId) setSheet({ kind: 'setup', mode: 'new' });
+    });
   }, []);
-  useEffect(() => {
-    if (!toast) return;
-    const id = setTimeout(() => setToast(""), 4000);
-    return () => clearTimeout(id);
-  }, [toast]);
-  function commit(next: Data, history = true, recover = false) {
-    if (storageError && !recover) {
-      setToast("保存エラーを解消するまで操作できません");
-      return false;
-    }
-    try {
-      persist(next);
-      const previous = dataRef.current;
-      if (history) setUndo((old) => [...old.slice(-19), previous]);
-      dataRef.current = next;
-      setData(next);
-      setStorageError(null);
-      return true;
-    } catch (error) {
-      setStorageError(
-        error instanceof StorageConflict ? error.message : "端末への保存に失敗しました。空き容量・Safariの設定を確認し、現在の記録をJSONで退避してください。",
-      );
-      return false;
-    }
-  }
-  function updateSession(changes: Partial<Session>) {
-    if (!s) return;
-    commit({
-      ...dataRef.current,
-      sessions: dataRef.current.sessions.map((x) =>
-        x.id === s.id ? { ...x, ...changes } : x,
-      ),
-    });
-  }
-  function updateBonus(id: string, patch: Partial<Bonus>) {
-    if (!s) return;
-    updateSession({
-      bonuses: s.bonuses.map((b) => (b.id === id ? { ...b, ...patch } : b)),
-    });
-  }
-  function updateDraft(patch: Partial<Session>) {
-    const next = { ...draft, ...patch };
-    try {
-      localStorage.setItem("hana-log:new-draft", JSON.stringify(next));
-      setDraft(next);
-    } catch {
-      setToast(
-        "開始フォームを保存できません。端末の空き容量を確認してください。",
-      );
-    }
-  }
-  function add(type: "BIG" | "REG") {
-    if (!s) return;
-    try {
-      const next = register(s, type);
-      if (
-        commit({
-          ...data,
-          sessions: data.sessions.map((x) => (x.id === s.id ? next : x)),
-        })
-      )
-        setToast(`${type} を仮登録しました。詳細はあとから入力できます`);
-    } catch (e) {
-      setToast((e as Error).message);
-    }
-  }
-  const close = () => setSheet(null);
-  const bonus = sheet?.startsWith("bonus:")
-    ? s?.bonuses.find((b) => b.id === sheet.slice(6))
-    : undefined;
-  const latestPending = s?.bonuses.filter((b) => !b.complete).at(-1);
-  const text = s ? share(s, shareDetail) : "";
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setToast("共有テキストをコピーしました");
-    } catch {
-      setToast(
-        "自動コピーできません。表示テキストを長押ししてコピーしてください。",
-      );
-    }
-  }
-  async function restore(file: File) {
-    try {
-      if (file.size > 10 * 1024 * 1024)
-        throw new Error("ファイルは10MB以下にしてください");
-      const next = parseBackup(await file.text());
-      if (
-        confirm(
-          `${next.sessions.length}件の実戦で現在の記録を置き換えます。先にバックアップを保存してください。復元しますか？`,
-        )
-      ) {
-        if (commit(next, true, true)) {
-          close();
-          setToast("バックアップを復元しました");
-        }
+
+  const showToast = useCallback((text: string, undo = true) => {
+    window.clearTimeout(toastTimer.current);
+    setToast({ text, undo, key: Date.now() });
+    toastTimer.current = window.setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  const persist = useCallback((st: AppState) => {
+    saveChain.current = saveChain.current.then(() => saveState(st).then(setSaveVia));
+  }, []);
+
+  /** すべての変更はここを通る：取消スタックに積んで即保存 */
+  const commit = useCallback(
+    (next: AppState, label: string, toastOn = true) => {
+      const prev = stateRef.current;
+      if (prev) {
+        undoRef.current.push({ state: prev, label });
+        if (undoRef.current.length > 200) undoRef.current.shift();
       }
-    } catch (e) {
-      setToast(`復元できません：${(e as Error).message}`);
+      stateRef.current = next;
+      setState(next);
+      persist(next);
+      if (toastOn) showToast(label);
+    },
+    [persist, showToast],
+  );
+
+  const updateActive = useCallback(
+    (fn: (s: Session) => Session, label: string, toastOn = true) => {
+      const st = stateRef.current;
+      if (!st || !st.activeId) return;
+      commit({ ...st, sessions: st.sessions.map((s) => (s.id === st.activeId ? fn(s) : s)) }, label, toastOn);
+    },
+    [commit],
+  );
+
+  const undo = useCallback(() => {
+    const last = undoRef.current.pop();
+    if (!last) {
+      showToast('取り消せる操作はありません', false);
+      return;
     }
-  }
+    stateRef.current = last.state;
+    setState(last.state);
+    persist(last.state);
+    showToast(`取消：${last.label}`, false);
+  }, [persist, showToast]);
+
+  if (!state) return <div className="boot">HANA LOG 読込中…</div>;
+
+  const session = state.sessions.find((s) => s.id === state.activeId) ?? null;
+
+  // ---------- 操作 ----------
+  const bufNum = buf === '' ? null : parseInt(buf, 10);
+  const regBonus = (type: BonusType) => {
+    if (!session) return;
+    if (bufNum == null) return showToast(`先に当選間G数を入力してください（${type}）`, false);
+    const label = session.bellPending && session.bellTotal != null ? `${type} ${bufNum}G・🔔累計${session.bellTotal} 登録` : `${type} ${bufNum}G 登録`;
+    updateActive((s) => addBonus(s, type, bufNum), label);
+    setBuf('');
+  };
+  const saveMid = () => {
+    if (!session) return;
+    if (bufNum == null) return showToast('現在のG数を入力してから途中保存', false);
+    updateActive((s) => setMid(s, bufNum), `現在${bufNum}G 途中保存`);
+    setBuf('');
+  };
+  const target = session ? bellTarget(session) : null;
+  const bellFor = target && !skipBell.has(target.id) ? target : null;
+  const setBell = () => {
+    if (!session) return;
+    if (bufNum == null) return showToast('外部カウンターのベル累計を入力してから🔔=', false);
+    if (bellFor) {
+      // 順番自由：直前に登録した当選のベル累計として記録
+      updateActive((s) => setBonusBells(s, bellFor.id, bufNum), `${bellFor.type} ${bellFor.games}G のベル累計 ${bufNum}`);
+    } else {
+      const before = aggregate(session).bells;
+      updateActive((s) => setBellTotal(s, bufNum), `ベル累計 ${before}→${bufNum}`);
+    }
+    setBuf('');
+  };
+
+  const machine = session ? getMachine(session.machineId) : null;
+  const latestPending = session && machine ? [...session.bonuses].reverse().find((b) => !isComplete(b, machine)) : undefined;
+
   return (
-    <>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">
-            <Icon name="flower" size={30} />
-          </span>
-          <span>
-            HANA <b>LOG</b>
-            <small>ハナハナ実戦記録</small>
-          </span>
-        </div>
-        <div className="header-right">
-          <span className="local-label">
-            <i />
-            {online ? "端末に保存" : "オフライン"}
-          </span>
-          <button
-            className="icon-button"
-            aria-label="バックアップと設定"
-            onClick={() => setSheet("backup")}
-          >
-            <Icon name="save" />
-          </button>
-        </div>
-      </header>
-      <main>
-        <div className="page-heading">
-          <div>
-            <div className="eyebrow">YOUR PLAY, YOUR RECORD.</div>
-            <h1>
-              {tab === "sessions"
-                ? "実戦一覧"
-                : tab === "summary"
-                  ? "実戦サマリー"
-                  : "実戦を記録する"}
-            </h1>
-          </div>
-          <button className="text-button" onClick={() => setSheet("new")}>
-            <Icon name="plus" size={16} />
-            新規実戦
-          </button>
-        </div>
-        {storageError && (
-          <div className="error" role="alert">
-            {storageError}
-            <button onClick={() => setSheet("backup")}>
-              バックアップ / 復元
-            </button>
-          </div>
-        )}
-        {tab === "sessions" ? (
-          <div className="session-list">
-            {data.sessions.length === 0 ? (
-              <Empty onStart={() => setSheet("new")} />
-            ) : (
-              data.sessions
-                .slice()
-                .reverse()
-                .map((x) => {
-                  const a = totals(x);
-                  return (
-                    <button
-                      className="session-card panel"
-                      key={x.id}
-                      onClick={() => {
-                        if (commit({ ...data, activeId: x.id })) {
-                          setTab("record");
-                        }
-                      }}
-                    >
-                      <span className="eyebrow">
-                        {x.date} · {x.endedAt ? "終了" : "実戦中"}
-                      </span>
-                      <strong>
-                        {x.store || "店舗未記録"}{" "}
-                        <span>{x.table ? `${x.table}番台` : ""}</span>
-                      </strong>
-                      <small>{machine.name}</small>
-                      <div>
-                        {fmt(a.total)} G <b className="red">B {a.big}</b>
-                        <b className="blue">R {a.reg}</b>
-                        <Icon name="arrow" />
-                      </div>
-                    </button>
-                  );
-                })
-            )}
-          </div>
-        ) : !s || !t ? (
-          <Empty onStart={() => setSheet("new")} />
-        ) : (
-          <>
-            <section className="session-head panel">
-              <div className="session-top">
-                <span className="status">
-                  <i />
-                  {s.endedAt ? "実戦終了" : "実戦中"}
-                </span>
-                <span className="muted">
-                  {s.date.replaceAll("-", ".")}
-                  <button
-                    className="text-button compact"
-                    onClick={() => setSheet("info")}
-                  >
-                    編集
-                  </button>
-                </span>
-              </div>
-              <div className="machine-title">
-                <h2>{s.store || "店舗未記録"}</h2>
-                <span className="table-number">
-                  台番 <b>{s.table || "—"}</b>
-                </span>
-              </div>
-              <p>{machine.name}</p>
-              <div className="stats">
-                <div>
-                  <span>台の総ゲーム数</span>
-                  <strong>
-                    {fmt(t.total)}
-                    <small>G</small>
-                  </strong>
-                </div>
-                <div>
-                  <span>
-                    <i className="dot red-bg" />
-                    BIG 累計
-                  </span>
-                  <strong className="red">
-                    {t.big}
-                    <small>回</small>
-                  </strong>
-                </div>
-                <div>
-                  <span>
-                    <i className="dot blue-bg" />
-                    REG 累計
-                  </span>
-                  <strong className="blue">
-                    {t.reg}
-                    <small>回</small>
-                  </strong>
-                </div>
-              </div>
-              <div className="own-line">
-                自分の実戦 <b>{fmt(t.own)} G</b>
-                <span>
-                  BIG {t.ownBig} / REG {t.ownReg}
-                </span>
-                <span>着席時 {fmt(s.startTotal)} G</span>
-              </div>
-            </section>
-            {tab === "summary" ? (
-              <Summary s={s} />
-            ) : (
-              <div className="workspace-grid">
-                <div className="play-column">
-                  <section className="play-panel panel">
-                    <div className="section-title">
-                      <h2>
-                        <Icon name="flower" size={18} />
-                        ボーナスを記録
-                      </h2>
-                      <span className="muted">当選時にタップ</span>
-                    </div>
-                    <div className="gap-entry">
-                      <label htmlFor="current-gap">現在の当選間ゲーム数</label>
-                      <div className="big-number">
-                        <GapInput
-                          s={s}
-                          update={(v) => updateSession({ currentGap: v })}
-                        />
-                        <span>G</span>
-                      </div>
-                      <small>
-                        途中経過も自動保存。当選時のG数に置き換わります。
-                      </small>
-                    </div>
-                    <div className="bonus-buttons">
-                      <button
-                        className="big-button"
-                        disabled={!!s.endedAt || !!storageError}
-                        onClick={() => add("BIG")}
-                      >
-                        <Icon name="plus" size={23} />
-                        <strong>BIG</strong>
-                        <small>仮登録</small>
-                      </button>
-                      <button
-                        className="reg-button"
-                        disabled={!!s.endedAt || !!storageError}
-                        onClick={() => add("REG")}
-                      >
-                        <Icon name="plus" size={23} />
-                        <strong>REG</strong>
-                        <small>仮登録</small>
-                      </button>
-                    </div>
-                    <div className="helper">
-                      <Icon name="check" size={14} />
-                      スイカ・ランプは、ボーナス消化後に入力できます
-                    </div>
-                    {latestPending && (
-                      <button
-                        className="pending"
-                        onClick={() => setSheet(`bonus:${latestPending.id}`)}
-                      >
-                        <span
-                          className={`badge ${latestPending.type === "BIG" ? "big" : "reg"}`}
-                        >
-                          {latestPending.type}
-                        </span>
-                        <span>
-                          {latestPending.gap}G の詳細が未確定
-                          <small>スイカ・ランプ色を記録する</small>
-                        </span>
-                        <Icon name="arrow" size={17} />
-                      </button>
-                    )}
-                  </section>
-                  <section className="bell-panel panel">
-                    <div>
-                      <h2>
-                        <Icon name="bell" />
-                        ベルカウンター
-                      </h2>
-                      <span className="muted">通常時のみ / 自分の実戦分</span>
-                    </div>
-                    <div className="bell-controls">
-                      <button
-                        className="bell-value"
-                        aria-label="ベル累計を直接入力"
-                        onClick={() => setSheet("bell")}
-                      >
-                        {fmt(s.bells)}
-                        <small>
-                          回 <span>編集</span>
-                        </small>
-                      </button>
-                      <button
-                        className="bell-minus"
-                        aria-label="ベルを1回減らす"
-                        disabled={!!s.endedAt || s.bells === 0}
-                        onClick={() =>
-                          updateSession({ bells: Math.max(0, s.bells - 1) })
-                        }
-                      >
-                        −
-                      </button>
-                      <button
-                        className="bell-plus"
-                        aria-label="ベルを1回増やす"
-                        disabled={!!s.endedAt}
-                        onClick={() => updateSession({ bells: s.bells + 1 })}
-                      >
-                        <Icon name="plus" />1
-                      </button>
-                    </div>
-                  </section>
-                  <section className="investment panel">
-                    <div className="section-title">
-                      <h2>
-                        <Icon name="wallet" size={18} />
-                        投資記録
-                      </h2>
-                      <button
-                        className="text-button compact"
-                        onClick={() => setSheet("investment")}
-                      >
-                        編集
-                        <Icon name="arrow" size={14} />
-                      </button>
-                    </div>
-                    <div className="money-row">
-                      <div>
-                        <span>現金投資</span>
-                        <b>
-                          {s.cash === null ? "—" : fmt(s.cash)}
-                          <small>円</small>
-                        </b>
-                      </div>
-                      <div>
-                        <span>使用貯メダル</span>
-                        <b>
-                          {s.medals === null ? "—" : fmt(s.medals)}
-                          <small>枚</small>
-                        </b>
-                      </div>
-                      <div>
-                        <span>回収枚数</span>
-                        <b>
-                          {s.recovered === null ? "—" : fmt(s.recovered)}
-                          <small>枚</small>
-                        </b>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-                <section className="history panel">
-                  <div className="section-title">
-                    <h2>
-                      <Icon name="clock" size={18} />
-                      当選履歴<span className="count">{s.bonuses.length}</span>
-                    </h2>
-                    <span className="muted">新しい順</span>
-                  </div>
-                  {s.bonuses.length === 0 ? (
-                    <div className="empty-history">
-                      <span>
-                        <Icon name="list" size={27} />
-                      </span>
-                      <strong>ここから、今日の記録を。</strong>
-                      <p>
-                        BIG・REGを登録すると
-                        <br />
-                        当選履歴がここに表示されます。
-                      </p>
-                      <small>未入力と0回を区別して記録します</small>
-                    </div>
-                  ) : (
-                    <div className="history-rows">
-                      {t.rows
-                        .slice()
-                        .reverse()
-                        .map((b, index) => (
-                          <button
-                            className="history-row"
-                            key={b.id}
-                            onClick={() => setSheet(`bonus:${b.id}`)}
-                          >
-                            <div className="history-line">
-                              <time>
-                                {new Date(b.at).toLocaleTimeString("ja-JP", {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
-                              </time>
-                              <span
-                                className={`badge ${b.type === "BIG" ? "big" : "reg"}`}
-                              >
-                                {b.type}
-                              </span>
-                              <strong>
-                                {fmt(b.gap)}
-                                <small>G</small>
-                              </strong>
-                              <span className="row-total">
-                                累計 {fmt(b.total)}G
-                              </span>
-                              <Icon name="arrow" size={14} />
-                            </div>
-                            <div className="history-detail">
-                              <span>🍉 {b.watermelon ?? "未記録"}</span>
-                              {b.type === "BIG" && (
-                                <span>
-                                  後半 <Lamp value={b.side} />
-                                </span>
-                              )}
-                              <span>
-                                終了 <Lamp value={b.end} />
-                              </span>
-                              {!b.complete && <em>仮登録</em>}
-                            </div>
-                            {index === 0 && (
-                              <span className="latest-label">LATEST</span>
-                            )}
-                          </button>
-                        ))}
-                    </div>
-                  )}
-                  <div className="history-foot">
-                    履歴をタップして詳細の入力・修正
-                  </div>
-                </section>
+    <div className="app">
+      {session ? (
+        <>
+          <Header s={session} onEdit={() => setSheet({ kind: 'setup', mode: 'edit' })} />
+          <History
+            s={session}
+            onOpen={(id) => setSheet({ kind: 'bonus', id })}
+            onTail={() => setSheet({ kind: 'end' })}
+          />
+          <div className="panel">
+            {canAskGakkun(session) && session.gakkun == null && (
+              <div className="ask">
+                <span>リールガックン</span>
+                <button onClick={() => updateActive((s) => ({ ...s, gakkun: true }), 'ガックンあり')}>あり</button>
+                <button onClick={() => updateActive((s) => ({ ...s, gakkun: false }), 'ガックンなし')}>なし</button>
               </div>
             )}
-            <div className="bottom-actions">
-              <button
-                className="share-button"
-                onClick={() => {
-                  setShareDetail(false);
-                  setSheet("share");
-                }}
-              >
-                <Icon name="copy" />
-                ChatGPTに共有
-                <Icon name="arrow" size={16} />
+            {bellFor && (
+              <div className="ask bellAsk">
+                <span>🔔 <span className={bellFor.type === 'BIG' ? 'tag big' : 'tag reg'}>{bellFor.type}</span> {bellFor.games}G 当選時のベル累計 → 🔔=</span>
+                <button onClick={() => setSkipBell((x) => new Set(x).add(bellFor.id))}>あとで</button>
+              </div>
+            )}
+            {!bellFor && latestPending && (
+              <button className="pending" onClick={() => setSheet({ kind: 'bonus', id: latestPending.id })}>
+                <span className={latestPending.type === 'BIG' ? 'tag big' : 'tag reg'}>{latestPending.type}</span>
+                {latestPending.games}G の判別記録を入力 ›
               </button>
-              <button className="end-button" onClick={() => setSheet("end")}>
-                {s.endedAt ? "終了内容を確認" : "実戦を終了する"}
-              </button>
+            )}
+            <Keypad buf={buf} setBuf={setBuf} onMid={saveMid} onBell={setBell} bellMode={!!bellFor} />
+            <div className="bonusRow">
+              <button className="bigBtn" onClick={() => regBonus('BIG')}>BIG</button>
+              <button className="regBtn" onClick={() => regBonus('REG')}>REG</button>
             </div>
-            <div className="save-note">
-              <Icon name="check" size={13} />
-              {storageError
-                ? "保存に問題があります"
-                : "入力ごとにこの端末へ自動保存"}
-              <span>
-                ·{" "}
-                {swReady
-                  ? "オフライン準備完了"
-                  : "初回のオフライン準備は公開後に確認"}
-              </span>
-            </div>
-          </>
-        )}
-        <footer>
-          <span>HANA LOG</span> 記録を、もっとシンプルに。
-          <button onClick={() => setSheet("backup")}>バックアップ</button>
-        </footer>
-      </main>
-      <nav className="bottom-nav">
-        {[
-          { id: "record", name: "実戦記録", icon: "flower" },
-          { id: "summary", name: "サマリー", icon: "chart" },
-          { id: "sessions", name: "実戦一覧", icon: "list" },
-        ].map((x) => (
-          <button
-            className={tab === x.id ? "active" : ""}
-            key={x.id}
-            onClick={() => setTab(x.id)}
-          >
-            <Icon name={x.icon} />
-            {x.name}
-          </button>
-        ))}
-        <button
-          disabled={!undo.length || !!storageError}
-          onClick={() => {
-            const prev = undo.at(-1)!;
-            if (commit(prev, false)) {
-              setUndo(undo.slice(0, -1));
-              setToast("直前の操作を取り消しました");
-            }
-          }}
-        >
-          <Icon name="undo" />
-          取り消し
-        </button>
-      </nav>
+            <BellRow s={session} />
+            <nav className="foot">
+              <button onClick={undo}>↶<small>取消</small></button>
+              <button onClick={() => setSheet({ kind: 'invest' })}>¥<small>投資</small></button>
+              <button className="share" onClick={() => setSheet({ kind: 'share' })}>⇪<small>共有</small></button>
+              <button onClick={() => setSheet({ kind: 'end' })}>■<small>{session.endGames != null ? '終了済' : '終了'}</small></button>
+              <button onClick={() => setSheet({ kind: 'menu' })}>☰<small>台・保存</small></button>
+            </nav>
+          </div>
+        </>
+      ) : (
+        <div className="empty">
+          <h1>HANA LOG</h1>
+          <p>ハナハナ実戦記録</p>
+          <button className="primary" onClick={() => setSheet({ kind: 'setup', mode: 'new' })}>実戦開始</button>
+          <button onClick={() => setSheet({ kind: 'menu' })}>保存データ・バックアップ</button>
+        </div>
+      )}
+
       {toast && (
-        <div className="toast" role="status">
-          {toast}
+        <div className="toast" key={toast.key}>
+          <span>{toast.text}</span>
+          {toast.undo && <button onClick={undo}>取消</button>}
         </div>
       )}
-      {sheet === "new" && (
-        <Sheet title="新しい実戦をはじめる" close={close}>
-          <p className="sheet-help">
-            台ごとに独立した記録を保存します。入力途中も端末に保存されます。
-          </p>
-          <SessionFields s={draft} update={updateDraft} />
-          <button
-            className="primary full"
-            onClick={() => {
-              if (draft.startGap > draft.startTotal) {
-                setToast("当選間Gは台の総G以下にしてください");
-                return;
-              }
-              const next = { ...draft, currentGap: draft.startGap };
-              if (
-                commit({
-                  ...data,
-                  sessions: [...data.sessions, next],
-                  activeId: next.id,
-                })
-              ) {
-                const fresh = newSession();
-                setDraft(fresh);
-                try {
-                  localStorage.removeItem("hana-log:new-draft");
-                } catch {}
-                setTab("record");
-                close();
-                navigator.storage?.persist?.().catch(() => {});
-                setToast("実戦を開始しました");
-              }
-            }}
-          >
-            この台で実戦を開始
-            <Icon name="arrow" size={16} />
-          </button>
-        </Sheet>
+
+      {sheet?.kind === 'bonus' && session && (
+        <BonusSheet
+          s={session}
+          id={sheet.id}
+          onClose={() => setSheet(null)}
+          onPatch={(patch, label) => updateActive((s) => updateBonus(s, sheet.id, patch), label, false)}
+          onType={(t) => updateActive((s) => setBonusType(s, sheet.id, t), `種別を${t}に修正`)}
+          onResetFlash={(v) => updateActive((s) => ({ ...s, resetFlash: v }), 'リセットフラッシュ', false)}
+          onDelete={() => {
+            const b = session.bonuses.find((x) => x.id === sheet.id);
+            updateActive((s) => deleteBonus(s, sheet.id), `${b?.type} ${b?.games}G を削除`);
+            setSheet(null);
+          }}
+        />
       )}
-      {sheet === "info" && s && (
-        <Sheet title="実戦情報を編集" close={close}>
-          <p className="sheet-help">
-            入力ごとに自動保存します。開始位置の変更はすべての累計に反映されます。
-          </p>
-          <SessionFields
-            s={s}
-            update={(p) => {
-              const next = { ...s, ...p };
-              if (
-                next.startGap > next.startTotal ||
-                (next.bonuses[0]?.gap ?? next.currentGap) < next.startGap
-              ) {
-                setToast(
-                  "開始位置が現在の記録と矛盾します。総G・履歴・現在Gを先に修正してください",
-                );
-                return;
-              }
-              updateSession(p);
-            }}
-          />
-          <button className="primary full" onClick={close}>
-            完了
-          </button>
-        </Sheet>
+      {sheet?.kind === 'setup' && (
+        <SetupSheet
+          mode={sheet.mode}
+          s={sheet.mode === 'edit' ? session : null}
+          prefs={state.prefs}
+          onClose={() => setSheet(null)}
+          onSave={(s, prefs) => {
+            const st = stateRef.current!;
+            if (sheet.mode === 'new') {
+              commit({ ...st, prefs, sessions: [...st.sessions, s], activeId: s.id }, '実戦開始');
+            } else {
+              commit({ ...st, prefs, sessions: st.sessions.map((x) => (x.id === s.id ? s : x)) }, '台情報を更新');
+            }
+            setSheet(null);
+          }}
+        />
       )}
-      {bonus && s && (
-        <Sheet title={`${bonus.type} の詳細`} close={close}>
-          <div className="detail-info">
-            <span className={`badge ${bonus.type === "BIG" ? "big" : "reg"}`}>
-              {bonus.type}
+      {sheet?.kind === 'invest' && session && (
+        <InvestSheet s={session} onClose={() => setSheet(null)} onSave={(p) => { updateActive((s) => ({ ...s, ...p, updatedAt: new Date().toISOString() }), '投資・回収を保存'); setSheet(null); }} />
+      )}
+      {sheet?.kind === 'share' && session && <ShareSheet s={session} onClose={() => setSheet(null)} toast={showToast} />}
+      {sheet?.kind === 'end' && session && (
+        <EndSheet
+          s={session}
+          initial={buf}
+          onClose={() => setSheet(null)}
+          onEnd={(g, payout) => {
+            updateActive((s) => ({ ...endSession(s, g), payout: payout ?? s.payout }), `${g}Gで実戦終了`);
+            setBuf('');
+            setSheet({ kind: 'share' });
+          }}
+          onReopen={() => { updateActive(reopenSession, '実戦を再開'); setSheet(null); }}
+        />
+      )}
+      {sheet?.kind === 'menu' && (
+        <MenuSheet
+          st={state}
+          saveVia={saveVia}
+          onClose={() => setSheet(null)}
+          onSwitch={(id) => { commit({ ...state, activeId: id }, '台を切替'); setSheet(null); }}
+          onNew={() => setSheet({ kind: 'setup', mode: 'new' })}
+          onDelete={(id) => {
+            const sessions = state.sessions.filter((s) => s.id !== id);
+            commit({ ...state, sessions, activeId: state.activeId === id ? sessions[sessions.length - 1]?.id ?? null : state.activeId }, '台データを削除');
+          }}
+          onSample={() => {
+            const s = buildSample();
+            commit({ ...state, sessions: [...state.sessions, s], activeId: s.id }, 'サンプル（合成）を読込');
+            setSheet(null);
+          }}
+          onRestore={(st) => { commit(st, 'バックアップから復元'); setSheet(null); }}
+          toast={showToast}
+        />
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
+function Header({ s, onEdit }: { s: Session; onEdit: () => void }) {
+  const a = aggregate(s);
+  const m = getMachine(s.machineId);
+  return (
+    <header className="head" onClick={onEdit}>
+      <div className="meta">
+        <span>{s.date.replace(/-/g, '/')}</span>
+        <span className="store">{s.store || '店舗未入力'}</span>
+        <span>台{s.tableNo || '―'}</span>
+        <span className="mach">{m.short}</span>
+        {s.endGames != null && <span className="endTag">終了</span>}
+      </div>
+      <div className="stats">
+        <div><small>累計</small><b>{a.total.toLocaleString()}</b><i>G</i></div>
+        <div className="sb"><small>BIG</small><b>{a.big}</b></div>
+        <div className="sr"><small>REG</small><b>{a.reg}</b></div>
+        <div><small>{s.endGames != null ? 'ヤメ' : '現在'}</small><b>{a.counter}</b><i>G</i></div>
+      </div>
+    </header>
+  );
+}
+
+function lampNode(v: LampValue, prefix = ''): ReactNode {
+  if (v === NA) return null;
+  if (v === null) return <span className="dimv">{prefix}?</span>;
+  if (v === MISS) return <span className="missv">{prefix}{MISS_EMOJI}</span>;
+  return <span>{prefix}{LAMP_EMOJI[v]}</span>;
+}
+
+function judgeText(b: Bonus): ReactNode {
+  const su = b.suika === null ? <span className="dimv">🍉?</span> : b.suika === NA ? null : <span>🍉{b.suika === 3 ? '3+' : b.suika}</span>;
+  const parts: ReactNode[] = [su, lampNode(b.side), lampNode(b.end, b.type === 'REG' && b.side === NA ? '終了' : '')];
+  if (b.retroRight === true) parts.push(<span className="retro">{b.retroActual === true ? '♪発生' : '♪権利'}</span>);
+  const xs = parts.filter(Boolean);
+  return xs.map((p, i) => (
+    <span key={i}>
+      {i > 0 && '・'}
+      {p}
+    </span>
+  ));
+}
+
+function History({ s, onOpen, onTail }: { s: Session; onOpen: (id: string) => void; onTail: () => void }) {
+  const rows = useMemo(() => timeline(s).reverse(), [s]);
+  const m = getMachine(s.machineId);
+  const a = aggregate(s);
+  return (
+    <section className="hist">
+      <div className="hrow hh">
+        <span>当選G</span><span>種別</span><span>判別・🔔ボーナス間ベル ✎</span><span>累計G</span>
+      </div>
+      {(s.midGames != null || s.endGames != null) && (
+        <button className="hrow cur" onClick={onTail}>
+          <span className="g">{s.endGames ?? s.midGames}</span>
+          <span className="tt">{s.endGames != null ? 'ヤメ' : '途中'}</span>
+          <span className="jd">
+            <span className="bl">{tailBellText(s)}</span>
+          </span>
+          <span className="c">{a.total}<small>{hhmm(s.endedAt ?? s.midAt)}</small></span>
+        </button>
+      )}
+      {rows.length === 0 && <div className="noh">当選履歴はまだありません<br />G数を入力して BIG / REG をタップ</div>}
+      {rows.map((r: TimelineRow) => {
+        const done = isComplete(r.bonus, m);
+        return (
+          <button key={r.bonus.id} className={`hrow ${done ? '' : 'todo'}`} onClick={() => onOpen(r.bonus.id)}>
+            <span className="g">{r.bonus.games}{r.warn && '⚠'}</span>
+            <span className={r.bonus.type === 'BIG' ? 'tb' : 'tr'}>{r.bonus.type}</span>
+            <span className="jd">
+              <span className="jl">{judgeText(r.bonus)}</span>
+              <span className={`bl ${r.bonus.bellsAt == null ? 'nob' : ''}`}>{rowBellText(r)}</span>
             </span>
-            <span>{new Date(bonus.at).toLocaleString("ja-JP")}</span>
-            <span className="autosaved">
-              <Icon name="check" size={13} />
-              自動保存
-            </span>
-          </div>
-          <NumberField
-            label="当選間ゲーム数"
-            value={bonus.gap}
-            min={s.bonuses[0]?.id === bonus.id ? s.startGap : 0}
-            onChange={(v) => updateBonus(bonus.id, { gap: v ?? 0 })}
-          />
-          <div className="field">
-            <span>ボーナス種別</span>
-            <div className="choices">
-              {(["BIG", "REG"] as const).map((type) => (
-                <button
-                  key={type}
-                  className={bonus.type === type ? "selected" : ""}
-                  onClick={() => {
-                    if (
-                      type !== bonus.type &&
-                      confirm(
-                        "種別を変更するとスイカ・ランプ・レトロ情報を未記録に戻します。変更しますか？",
-                      )
-                    )
-                      updateBonus(bonus.id, {
-                        type,
-                        watermelon: null,
-                        side: null,
-                        end: null,
-                        retroRight: null,
-                        retroPlayed: null,
-                        complete: false,
-                      });
-                  }}
-                >
-                  {type}
-                </button>
-              ))}
-            </div>
-          </div>
-          <NumberField
-            label={
-              bonus.type === "BIG" ? "BIG前半の自然スイカ" : "REG中の自然スイカ"
-            }
-            value={bonus.watermelon}
-            nullable
-            unit="回"
-            onChange={(v) => updateBonus(bonus.id, { watermelon: v })}
-          />
-          <p className="tiny-note">
-            技術介入によるスイカは含めません。未記録と0回は別に保存します。
-          </p>
-          {bonus.type === "BIG" && (
-            <Choices
-              label="BIG後半 サイドランプ"
-              values={machine.sideColors}
-              value={bonus.side}
-              onChange={(v) => updateBonus(bonus.id, { side: v })}
-            />
-          )}
-          <Choices
-            label={`${bonus.type}終了時 ランプ`}
-            values={machine.endColors}
-            value={bonus.end}
-            onChange={(v) => updateBonus(bonus.id, { end: v })}
-          />
-          {bonus.type === "BIG" && (
-            <>
-              <Tri
-                label="レトロサウンド権利"
-                value={bonus.retroRight}
-                onChange={(v) => updateBonus(bonus.id, { retroRight: v })}
-              />
-              <Tri
-                label="レトロサウンド実発生"
-                value={bonus.retroPlayed}
-                onChange={(v) => updateBonus(bonus.id, { retroPlayed: v })}
-              />
-            </>
-          )}
-          <label className="field">
-            <span>メモ（任意）</span>
-            <textarea
-              value={bonus.memo}
-              onChange={(e) => updateBonus(bonus.id, { memo: e.target.value })}
-              placeholder="気づいたことを残す"
-            />
-          </label>
-          <button
-            className="primary full"
-            onClick={() => {
-              updateBonus(bonus.id, { complete: true });
-              close();
-            }}
-          >
-            詳細を確定する
-            <Icon name="check" size={17} />
+            <span className="c">{r.cumTotal}<small>{hhmm(r.bonus.at)}</small></span>
           </button>
-          <button
-            className="danger-link full"
-            onClick={() => {
-              if (
-                confirm("この当選履歴を削除しますか？累計値も再計算されます。")
-              ) {
-                const bonuses = s.bonuses.filter((b) => b.id !== bonus.id);
-                if ((bonuses[0]?.gap ?? s.currentGap) < s.startGap) {
-                  setToast(
-                    "削除後の開始位置が矛盾します。着席時の当選間Gを先に修正してください",
-                  );
-                  return;
-                }
-                updateSession({ bonuses });
-                close();
-              }
-            }}
-          >
-            この履歴を削除
-          </button>
-        </Sheet>
-      )}
-      {sheet === "bell" && s && (
-        <Sheet title="ベル累計を直接入力" close={close}>
-          <p className="sheet-help">
-            外部カウンターの現在値で置き換えます。通常時・自分の実戦分のみ。
-          </p>
-          <NumberField
-            label="ベル累計"
-            unit="回"
-            value={s.bells}
-            onChange={(v) => updateSession({ bells: v ?? 0 })}
-          />
-          <button className="primary full" onClick={close}>
-            完了
-          </button>
-        </Sheet>
-      )}
-      {sheet === "investment" && s && (
-        <Sheet title="投資記録" close={close}>
-          <p className="sheet-help">
-            追加額ではなく、今回の実戦の累計値を入力してください。
-          </p>
-          <Investment s={s} update={updateSession} />
-          <button className="primary full" onClick={close}>
-            完了
-          </button>
-        </Sheet>
-      )}
-      {sheet === "share" && s && (
-        <Sheet title="ChatGPTに共有" close={close}>
-          <div className="segmented">
-            <button
-              className={!shareDetail ? "selected" : ""}
-              onClick={() => setShareDetail(false)}
-            >
-              簡易共有
-            </button>
-            <button
-              className={shareDetail ? "selected" : ""}
-              onClick={() => setShareDetail(true)}
-            >
-              詳細共有
-            </button>
-          </div>
-          <p className="sheet-help">
-            記録した生データをコピーします。アプリから外部には送信しません。
-          </p>
-          <textarea
-            className="share-preview"
-            aria-label="共有テキスト"
-            readOnly
-            value={text}
-          />
-          <button className="primary full" onClick={copy}>
-            <Icon name="copy" />
-            テキストをコピー
-          </button>
-        </Sheet>
-      )}
-      {sheet === "end" && s && (
-        <Sheet
-          title={s.endedAt ? "実戦終了の記録" : "今日も、おつかれさまでした。"}
-          close={close}
-        >
-          <p className="sheet-help">
-            最後の当選以降のゲーム数を入力してください。台の総Gへ加算されます。
-          </p>
-          <NumberField
-            label="最終ハマリゲーム数"
-            value={s.currentGap}
-            min={s.bonuses.length === 0 ? s.startGap : 0}
-            onChange={(v) => updateSession({ currentGap: v ?? 0 })}
-          />
-          <Investment s={s} update={updateSession} />
-          <button
-            className="primary full"
-            onClick={() => {
-              updateSession({
-                endedAt: s.endedAt ? null : new Date().toISOString(),
-              });
-              close();
-              setToast(
-                s.endedAt ? "実戦を再開しました" : "実戦を保存して終了しました",
-              );
-            }}
-          >
-            {s.endedAt ? "この実戦を再開する" : "記録して実戦を終了"}
-          </button>
-        </Sheet>
-      )}
-      {sheet === "backup" && (
-        <Sheet title="バックアップと保存" close={close}>
-          <div className="backup-info">
-            <Icon name="save" size={28} />
-            <h3>大切な記録を、手元にも。</h3>
-            <p>
-              記録はこのブラウザに保存されます。端末の故障やサイトデータの削除に備え、定期的にJSONを保存してください。
-            </p>
-          </div>
-          <button
-            className="primary full"
-            onClick={() => {
-              download(data);
-              setToast("JSONバックアップを出力しました");
-            }}
-          >
-            <Icon name="save" />
-            全実戦をJSONで保存
-          </button>
-          <button
-            className="secondary full"
-            onClick={() => fileRef.current?.click()}
-          >
-            JSONバックアップから復元
-          </button>
-          <p className="sheet-help">
-            復元は全データの置き換えです。復元前にバックアップを推奨します。直前の操作は「取り消し」で戻せます。
-          </p>
-          <hr />
-          <h3>iPhoneで使うには</h3>
-          <p className="sheet-help">
-            HTTPSで公開したページをSafariで開き、「共有」→「ホーム画面に追加」。初回オンライン読み込み後、オフラインでも記録できます。
-          </p>
-          <span className="muted">HANA LOG · v0.1.0 · ニューキングV対応</span>
-        </Sheet>
-      )}
-      <input
-        type="file"
-        accept="application/json,.json"
-        ref={fileRef}
-        hidden
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) void restore(f);
-          e.target.value = "";
-        }}
-      />
-    </>
-  );
-}
-function Lamp({ value }: { value: string | null }) {
-  return value ? (
-    <>
-      <i className="lamp small" style={{ background: colors[value] }} />
-      {value}
-    </>
-  ) : (
-    <>未記録</>
-  );
-}
-function Empty({ onStart }: { onStart: () => void }) {
-  return (
-    <section className="welcome panel">
-      <div className="welcome-flower">
-        <Icon name="flower" size={55} />
-      </div>
-      <div className="eyebrow">EVERY SPIN, A STORY.</div>
-      <h2>
-        今日の実戦を、
-        <br />
-        ひとつずつ、正確に。
-      </h2>
-      <p>
-        当選ゲーム数も、ランプの色も。
-        <br />
-        タップで残す、あなたのハナハナ実戦ノート。
-      </p>
-      <button className="primary" onClick={onStart}>
-        <Icon name="plus" />
-        はじめの実戦を記録
-      </button>
-      <div className="welcome-notes">
-        <span>
-          <Icon name="check" size={14} />
-          登録不要
-        </span>
-        <span>
-          <Icon name="check" size={14} />
-          端末に自動保存
-        </span>
-        <span>
-          <Icon name="check" size={14} />
-          オフライン対応
-        </span>
-      </div>
-    </section>
-  );
-}
-function SessionFields({
-  s,
-  update,
-}: {
-  s: Session;
-  update: (p: Partial<Session>) => void;
-}) {
-  return (
-    <>
-      <div className="form-grid">
-        <label className="field">
-          <span>日付</span>
-          <input
-            type="date"
-            value={s.date}
-            onChange={(e) => {
-              if (e.target.value) update({ date: e.target.value });
-            }}
-          />
-        </label>
-        <label className="field">
-          <span>台番号</span>
-          <input
-            inputMode="numeric"
-            value={s.table}
-            onChange={(e) => update({ table: e.target.value })}
-            placeholder="例：1625"
-          />
-        </label>
-      </div>
-      <label className="field">
-        <span>店舗名</span>
-        <input
-          value={s.store}
-          onChange={(e) => update({ store: e.target.value })}
-          placeholder="店舗名を入力"
-        />
-      </label>
-      <label className="field">
-        <span>機種</span>
-        <select value={s.machineId} onChange={() => {}}>
-          <option value={machine.id}>{machine.name}</option>
-        </select>
-      </label>
-      <h3 className="form-heading">着席時の台データ</h3>
-      <p className="tiny-note">
-        台の総Gは現在のハマリも含む通常時累計。ボーナス中のG数は含めません。表示仕様が異なる場合は換算して入力してください。
-      </p>
-      <div className="form-grid">
-        <NumberField
-          label="台の総ゲーム数"
-          value={s.startTotal}
-          onChange={(v) => update({ startTotal: v ?? 0 })}
-        />
-        <NumberField
-          label="現在の当選間G"
-          value={s.startGap}
-          onChange={(v) => update({ startGap: v ?? 0 })}
-        />
-        <NumberField
-          label="着席時 BIG"
-          value={s.startBig}
-          unit="回"
-          onChange={(v) => update({ startBig: v ?? 0 })}
-        />
-        <NumberField
-          label="着席時 REG"
-          value={s.startReg}
-          unit="回"
-          onChange={(v) => update({ startReg: v ?? 0 })}
-        />
-      </div>
-      <Tri
-        label="朝一リセットフラッシュ"
-        value={s.reset}
-        onChange={(v) => update({ reset: v })}
-      />
-      <Choices
-        label="リセットフラッシュ色"
-        values={machine.endColors}
-        value={s.resetColor}
-        onChange={(v) => update({ resetColor: v })}
-      />
-      <Investment s={s} update={update} />
-    </>
-  );
-}
-function Investment({
-  s,
-  update,
-}: {
-  s: Session;
-  update: (p: Partial<Session>) => void;
-}) {
-  return (
-    <>
-      <div className="form-grid">
-        <NumberField
-          label="現金投資 累計"
-          value={s.cash}
-          nullable
-          unit="円"
-          onChange={(v) => update({ cash: v })}
-        />
-        <NumberField
-          label="使用貯メダル 累計"
-          value={s.medals}
-          nullable
-          unit="枚"
-          onChange={(v) => update({ medals: v })}
-        />
-        <NumberField
-          label="回収枚数"
-          value={s.recovered}
-          nullable
-          unit="枚"
-          onChange={(v) => update({ recovered: v })}
-        />
-      </div>
-      <label className="field">
-        <span>実戦メモ</span>
-        <textarea
-          value={s.memo}
-          onChange={(e) => update({ memo: e.target.value })}
-          placeholder="任意のメモ"
-        />
-      </label>
-    </>
-  );
-}
-function Summary({ s }: { s: Session }) {
-  const t = totals(s);
-  return (
-    <section className="summary panel">
-      <div className="section-title">
-        <h2>自分の実戦の記録</h2>
-        <span className="muted">分析なし・生データのみ</span>
-      </div>
-      <div className="summary-water">
-        {[
-          ["BIG 自然スイカ", t.bigWater],
-          ["REG 自然スイカ", t.regWater],
-        ].map(([label, v]) => {
-          const w = v as typeof t.bigWater;
-          return (
-            <div key={label as string}>
-              <span>{label as string}</span>
-              <strong>
-                {w.sum}
-                <small>回</small>
-              </strong>
-              <small>未記録 {w.unknown}件</small>
-            </div>
-          );
-        })}
-      </div>
-      {[
-        ["BIG 後半サイド", t.side],
-        ["BIG 終了ランプ", t.bigEnd],
-        ["REG 終了ランプ", t.regEnd],
-      ].map(([label, v]) => (
-        <div className="lamp-summary" key={label as string}>
-          <h3>{label as string}</h3>
-          <div>
-            {Object.entries(v as Record<string, number>)
-              .filter(([, n]) => n > 0)
-              .map(([c, n]) => (
-                <span key={c}>
-                  <Lamp value={c === "未記録" ? null : c} />
-                  <b>{n}</b>
-                </span>
-              ))}
-            {!Object.values(v as Record<string, number>).some(Boolean) && (
-              <span>記録なし</span>
-            )}
-          </div>
-        </div>
-      ))}
-      <div className="retro-summary">
-        <span>
-          レトロ権利 <b>{t.retroRight}</b>回{" "}
-          <small>
-            未記録{" "}
-            {
-              s.bonuses.filter((b) => b.type === "BIG" && b.retroRight === null)
-                .length
-            }
-            件
-          </small>
-        </span>
-        <span>
-          レトロ実発生 <b>{t.retroPlayed}</b>回{" "}
-          <small>
-            未記録{" "}
-            {
-              s.bonuses.filter(
-                (b) => b.type === "BIG" && b.retroPlayed === null,
-              ).length
-            }
-            件
-          </small>
-        </span>
-      </div>
+        );
+      })}
+      {s.seatTotalGames > 0 || s.seatBig > 0 || s.seatReg > 0 ? (
+        <div className="seat">着席時：{s.seatTotalGames}G（表示{s.seatCurrentGames}G）B{s.seatBig}/R{s.seatReg}</div>
+      ) : null}
     </section>
   );
 }
 
-function GapInput({ s, update }: { s: Session; update: (n: number) => void }) {
-  const [raw, setRaw] = useState(
-    s.currentGap === 0 ? "" : String(s.currentGap),
-  );
-  useEffect(
-    () => setRaw(s.currentGap === 0 ? "" : String(s.currentGap)),
-    [s.currentGap, s.id],
-  );
-  const min = s.bonuses.length ? 0 : s.startGap;
+function rowBellText(r: TimelineRow): string {
+  if (r.bonus.bellsAt == null) return '🔔累計未入力';
+  if (r.bellDiff == null) return `🔔累計${r.bonus.bellsAt}`;
+  return `🔔+${r.bellDiff}${r.bellSpan > 1 ? `(${r.bellSpan}区間)` : ''}　${probText(r.bellRatio)}　累計${r.bonus.bellsAt}`;
+}
+function tailBellText(s: Session): string {
+  if (!s.bellPending || s.bellTotal == null) return '🔔累計未入力';
+  const t = bellTail(s);
+  return `🔔+${t.diff}　${probText(t.ratio)}　累計${s.bellTotal}`;
+}
+
+function Keypad(p: { buf: string; setBuf: (v: string) => void; onMid: () => void; onBell: () => void; bellMode: boolean }) {
+  const press = (d: string) => {
+    const nb = (p.buf + d).replace(/^0+(?=\d)/, '');
+    if (nb.length <= 5) p.setBuf(nb);
+  };
+  const K = (d: string) => <button className="k" onClick={() => press(d)}>{d}</button>;
   return (
-    <input
-      id="current-gap"
-      aria-label="現在の当選間ゲーム数"
-      type="text"
-      inputMode="numeric"
-      pattern="[0-9]*"
-      value={raw}
-      placeholder="0"
-      disabled={!!s.endedAt}
-      onBlur={() => setRaw(s.currentGap === 0 ? "" : String(s.currentGap))}
-      onChange={(e) => {
-        const v = e.target.value;
-        if (/^\d*$/.test(v) && Number(v) <= 100000000) {
-          setRaw(v);
-          if (Number(v) >= min) update(Number(v));
-        }
-      }}
-    />
+    <div className="pad">
+      <div className="disp">
+        {p.buf ? <b>{p.buf}</b> : <span className="ph">{p.bellMode ? 'ベル累計 → 🔔=（次の当選Gなら BIG/REG）' : '当選間G / ベル累計'}</span>}
+      </div>
+      <div className="keys">
+        {K('7')}{K('8')}{K('9')}
+        <button className="k fn" onClick={() => p.setBuf(p.buf.slice(0, -1))}>⌫</button>
+        {K('4')}{K('5')}{K('6')}
+        <button className="k fn" onClick={() => p.setBuf('')}>C</button>
+        {K('1')}{K('2')}{K('3')}
+        <button className="k fn mid" onClick={p.onMid}>途中<br />保存</button>
+        <button className="k zero" onClick={() => press('0')}>0</button>
+        <button className={`k fn bell ${p.bellMode ? 'hot' : ''}`} onClick={p.onBell}>🔔=<small>累計</small></button>
+      </div>
+    </div>
+  );
+}
+
+function BellRow({ s }: { s: Session }) {
+  const a = aggregate(s);
+  const t = bellTail(s);
+  return (
+    <div className="bellRow">
+      <div className={`bellNow ${s.bellPending ? 'pend' : ''}`}>
+        <span>🔔 累計</span>
+        <b>{a.bells}</b>
+        <small>
+          {s.bellPending
+            ? `前回記録から+${t.diff ?? 0}・次の当選に記録`
+            : 'テンキー→🔔=累計 で更新'}
+        </small>
+      </div>
+      <div className="bellTot">
+        <small>全体</small>
+        <b>{probText(a.bellRatio)}</b>
+      </div>
+    </div>
+  );
+}
+
+// =====================================================================
+function Sheet({ title, onClose, children, foot }: { title: ReactNode; onClose: () => void; children: ReactNode; foot?: ReactNode }) {
+  return (
+    <div className="ov" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sh">
+          <div className="st">{title}</div>
+          <button className="x" onClick={onClose}>閉じる</button>
+        </div>
+        <div className="sbody">{children}</div>
+        {foot && <div className="sfoot">{foot}</div>}
+      </div>
+    </div>
+  );
+}
+
+function supportTag(f: FieldSpec) {
+  if (f.support === 'unverified') return <em className="unv">仕様未確認</em>;
+  return null;
+}
+
+function Seg<T>(p: { value: T; options: Array<{ v: T; label: ReactNode; style?: React.CSSProperties; cls?: string }>; onChange: (v: T | null) => void; disabled?: boolean; wrap?: boolean }) {
+  return (
+    <div className={`seg ${p.disabled ? 'dis' : ''} ${p.wrap ? 'wrap' : ''}`}>
+      {p.options.map((o, i) => (
+        <button
+          key={i}
+          className={`${o.cls ?? ''} ${p.value === o.v ? 'on' : ''}`}
+          style={o.style}
+          disabled={p.disabled}
+          onClick={() => p.onChange(p.value === o.v ? null : o.v)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function LampPicker({ value, spec, onChange }: { value: LampValue; spec: FieldSpec; onChange: (v: LampValue) => void }) {
+  const opts: Array<{ v: LampValue; label: ReactNode; style?: React.CSSProperties; cls?: string }> = (spec.colors ?? []).map((c) => ({
+    v: c,
+    cls: `lamp l-${c}`,
+    style: { background: LAMP_CSS[c] },
+    label: <span>{LAMP_LABEL[c]}</span>,
+  }));
+  if (spec.miss) opts.push({ v: MISS, cls: 'lamp l-miss', label: <span>ミス</span> });
+  return <Seg<LampValue> value={value} onChange={(v) => onChange(v)} options={opts} />;
+}
+
+function Field({ label, tag, value, children }: { label: string; tag?: ReactNode; value: string; children: ReactNode }) {
+  return (
+    <div className="fld">
+      <div className="fl">
+        <span>{label}</span>
+        {tag}
+        <b className={value === '未記録' ? 'nv' : ''}>{value}</b>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const lampValText = (v: LampValue) => (v === null ? '未記録' : v === NA ? '対象外' : v === MISS ? 'ミス（判別不可）' : LAMP_LABEL[v]);
+const ynVal = (v: boolean | null | typeof NA) => (v === null ? '未記録' : v === NA ? '対象外' : v ? 'あり' : 'なし');
+const YN = [{ v: true, label: 'あり' }, { v: false, label: 'なし' }];
+
+function BonusSheet(p: {
+  s: Session; id: string; onClose: () => void; onPatch: (patch: Partial<Bonus>, label: string) => void;
+  onType: (t: BonusType) => void; onResetFlash: (v: boolean | null) => void; onDelete: () => void;
+}) {
+  const m = getMachine(p.s.machineId);
+  const rows = timeline(p.s);
+  const row = rows.find((r) => r.bonus.id === p.id);
+  const b = row?.bonus;
+  const complete = b ? isComplete(b, m) : false;
+  const wasComplete = useRef(complete);
+  const [delArm, setDelArm] = useState(false);
+  const [games, setGames] = useState(b ? String(b.games) : '');
+  const [bells, setBells] = useState(b?.bellsAt != null ? String(b.bellsAt) : '');
+  const [memo, setMemo] = useState(b?.memo ?? '');
+
+  // 未完了→完了になった瞬間に自動で閉じる（入力完了後は自動的に戻る）
+  useEffect(() => {
+    if (!wasComplete.current && complete) {
+      const t = window.setTimeout(p.onClose, 380);
+      wasComplete.current = true;
+      return () => window.clearTimeout(t);
+    }
+    wasComplete.current = complete;
+  }, [complete]); // eslint-disable-line
+
+  if (!b || !row) return null;
+  const sp = specOf(m, b.type);
+  const set = (patch: Partial<Bonus>) => p.onPatch(patch, '判別記録');
+  const showRF = isResetFlashTarget(p.s, b.id);
+
+  const commitGames = () => {
+    const n = parseNum(games);
+    if (n == null || n < 0) { setGames(String(b.games)); return; }
+    if (n !== b.games) p.onPatch({ games: n }, '当選G修正');
+  };
+  const commitBells = () => {
+    const n = parseNum(bells);
+    const v = n == null || n < 0 ? null : n;
+    if (v !== b.bellsAt) p.onPatch({ bellsAt: v }, 'ベル累計修正');
+  };
+  const setTime = (t: string) => {
+    const [h, mi] = t.split(':').map(Number);
+    if (isNaN(h) || isNaN(mi)) return;
+    const d = new Date(b.at);
+    d.setHours(h, mi, 0, 0);
+    p.onPatch({ at: d.toISOString() }, '時刻修正');
+  };
+
+  return (
+    <Sheet
+      onClose={p.onClose}
+      title={
+        <span>
+          <span className={b.type === 'BIG' ? 'tag big' : 'tag reg'}>{b.type}</span> #{row.no}・累計{row.cumTotal}G
+        </span>
+      }
+      foot={
+        <>
+          <button className={`del ${delArm ? 'arm' : ''}`} onClick={() => (delArm ? p.onDelete() : setDelArm(true))}>
+            {delArm ? 'もう一度で削除' : '削除'}
+          </button>
+          <button className="primary" onClick={p.onClose}>{complete ? '完了' : 'あとで入力'}</button>
+        </>
+      }
+    >
+      <div className="edrow3">
+        <label>当選G
+          <input inputMode="numeric" pattern="[0-9]*" value={games} onChange={(e) => setGames(e.target.value)} onBlur={commitGames} />
+        </label>
+        <label>ベル累計
+          <input inputMode="numeric" pattern="[0-9]*" value={bells} placeholder="未入力" onChange={(e) => setBells(e.target.value)} onBlur={commitBells} />
+        </label>
+        <label>時刻
+          <input type="time" value={hhmm(b.at)} onChange={(e) => setTime(e.target.value)} />
+        </label>
+      </div>
+      <p className="hint bd">
+        ボーナス間ベル：{row.bellDiff == null ? 'ベル累計未入力' : `${diffText(row)}回・${probText(row.bellRatio)}（${row.bellGames}G）`}
+      </p>
+      <Seg<BonusType>
+        value={b.type}
+        onChange={(v) => v && v !== b.type && p.onType(v)}
+        options={[{ v: 'BIG' as BonusType, label: 'BIG', cls: 'tbig' }, { v: 'REG' as BonusType, label: 'REG', cls: 'treg' }]}
+      />
+
+      {showRF && (
+        <Field label="リセットフラッシュ（1回目BIG）" value={p.s.resetFlash == null ? '未記録' : p.s.resetFlash ? 'あり' : 'なし'}>
+          <Seg value={p.s.resetFlash} onChange={(v) => p.onResetFlash(v)} options={YN} />
+        </Field>
+      )}
+
+      {sp.suika.support !== 'not_applicable' && (
+        <Field label={sp.suika.label} tag={supportTag(sp.suika)} value={b.suika === null ? '未記録' : b.suika === 3 ? '3回以上' : `${b.suika}回`}>
+          <Seg
+            value={b.suika}
+            onChange={(v) => set({ suika: v })}
+            options={[0, 1, 2, 3].map((n) => ({ v: n as 0 | 1 | 2 | 3, label: n === 3 ? '3+' : String(n), cls: 'num' }))}
+          />
+        </Field>
+      )}
+
+      {sp.side.support !== 'not_applicable' && (
+        <Field label={sp.side.label} tag={supportTag(sp.side)} value={lampValText(b.side)}>
+          <LampPicker value={b.side} spec={sp.side} onChange={(v) => set({ side: v })} />
+        </Field>
+      )}
+
+      {sp.end.support !== 'not_applicable' && (
+        <Field label={sp.end.label} tag={supportTag(sp.end)} value={lampValText(b.end)}>
+          <LampPicker value={b.end} spec={sp.end} onChange={(v) => set({ end: v })} />
+        </Field>
+      )}
+
+      {sp.retro.support !== 'not_applicable' && (
+        <div className="two">
+          <Field label="レトロ権利" value={ynVal(b.retroRight)}>
+            <Seg value={b.retroRight} onChange={(v) => set({ retroRight: v })} options={YN} />
+          </Field>
+          <Field label="レトロ発生" value={ynVal(b.retroActual)}>
+            <Seg value={b.retroActual} onChange={(v) => set({ retroActual: v })} options={YN} />
+          </Field>
+        </div>
+      )}
+
+      <label className="memo">メモ
+        <input value={memo} placeholder="任意" onChange={(e) => setMemo(e.target.value)} onBlur={() => memo !== b.memo && p.onPatch({ memo }, 'メモ')} />
+      </label>
+      <p className="hint">選択中のボタンをもう一度タップすると「未記録」に戻ります。「ミス」はビタ押しミス等で判別できなかったとき用です。</p>
+    </Sheet>
+  );
+}
+
+// =====================================================================
+function NumInput({ label, value, onChange, suffix, allowMinus }: { label: string; value: string; onChange: (v: string) => void; suffix?: string; allowMinus?: boolean }) {
+  const neg = value.startsWith('-');
+  return (
+    <label className="ni">
+      <span>{label}</span>
+      <div>
+        {allowMinus && (
+          <button type="button" className={`pm ${neg ? 'on' : ''}`} onClick={() => onChange(neg ? value.slice(1) : '-' + value)}>±</button>
+        )}
+        <input inputMode="numeric" pattern="[0-9]*" value={value} placeholder="未記録" onChange={(e) => onChange((neg ? '-' : '') + e.target.value.replace(/[^\d]/g, ''))} />
+        {suffix && <i>{suffix}</i>}
+      </div>
+    </label>
+  );
+}
+const ns = (n: number | null) => (n == null ? '' : String(n));
+const OTHER = '__other__';
+
+function SetupSheet({ mode, s, prefs, onClose, onSave }: { mode: 'new' | 'edit'; s: Session | null; prefs: Prefs; onClose: () => void; onSave: (s: Session, prefs: Prefs) => void }) {
+  const base = s ?? newSession();
+  const storeList = [...DEFAULT_STORES, ...prefs.stores.filter((x) => !DEFAULT_STORES.includes(x))];
+  const initialStore = base.store === '' ? '' : storeList.includes(base.store) ? base.store : OTHER;
+  const [f, setF] = useState({
+    date: base.date, storeSel: initialStore, storeOther: initialStore === OTHER ? base.store : '',
+    machineId: base.machineId, tableNo: base.tableNo,
+    lendRate: base.lendRate, lendOther: base.lendRate != null && !LEND_RATES.includes(base.lendRate) ? String(base.lendRate) : '',
+    seatTotalGames: ns(base.seatTotalGames || null), seatCurrentGames: ns(base.seatCurrentGames || null),
+    seatBig: ns(base.seatBig || null), seatReg: ns(base.seatReg || null),
+    gakkun: base.gakkun, cashInvest: ns(base.cashInvest), memo: base.memo,
+  });
+  const up = (k: keyof typeof f) => (v: any) => setF((x) => ({ ...x, [k]: v }));
+  const lendIsOther = f.lendRate != null && !LEND_RATES.includes(f.lendRate);
+  const [lendOtherOpen, setLendOtherOpen] = useState(lendIsOther);
+
+  const pickStore = (name: string | null) => {
+    if (name == null) return setF((x) => ({ ...x, storeSel: '' }));
+    const rate = name !== OTHER ? prefs.storeRates[name] : undefined;
+    setF((x) => ({ ...x, storeSel: name, lendRate: rate ?? x.lendRate }));
+    if (rate != null) setLendOtherOpen(!LEND_RATES.includes(rate));
+  };
+  const store = (f.storeSel === OTHER ? f.storeOther : f.storeSel).trim();
+  const fresh = (parseNum(f.seatTotalGames) ?? 0) === 0 && (parseNum(f.seatBig) ?? 0) === 0;
+
+  const save = () => {
+    const lendRate = lendOtherOpen ? parseNum(f.lendOther) : f.lendRate;
+    const next: Prefs = {
+      stores: store && !DEFAULT_STORES.includes(store) && !prefs.stores.includes(store) ? [...prefs.stores, store] : prefs.stores,
+      storeRates: store && lendRate != null ? { ...prefs.storeRates, [store]: lendRate } : prefs.storeRates,
+    };
+    onSave(
+      {
+        ...base, date: f.date, store, machineId: f.machineId, tableNo: f.tableNo.trim(), lendRate,
+        seatTotalGames: parseNum(f.seatTotalGames) ?? 0, seatCurrentGames: parseNum(f.seatCurrentGames) ?? 0,
+        seatBig: parseNum(f.seatBig) ?? 0, seatReg: parseNum(f.seatReg) ?? 0,
+        gakkun: fresh ? f.gakkun : null, resetFlash: fresh ? base.resetFlash : null,
+        cashInvest: parseNum(f.cashInvest), memo: f.memo, updatedAt: new Date().toISOString(),
+      },
+      next,
+    );
+  };
+  return (
+    <Sheet title={mode === 'new' ? '実戦開始' : '台情報の編集'} onClose={onClose} foot={<button className="primary wide" onClick={save}>{mode === 'new' ? 'この台で開始' : '保存'}</button>}>
+      <Field label="店舗" value={store || '未選択'}>
+        <Seg<string>
+          wrap
+          value={f.storeSel}
+          onChange={(v) => pickStore(v)}
+          options={[...storeList.map((n) => ({ v: n, label: n, cls: 'chip' })), { v: OTHER, label: 'その他（入力）', cls: 'chip' }]}
+        />
+        {f.storeSel === OTHER && (
+          <input value={f.storeOther} placeholder="店舗名（次回から選択肢に追加）" onChange={(e) => up('storeOther')(e.target.value)} />
+        )}
+      </Field>
+      <Field label="貸し枚数（1000円あたり）" value={(lendOtherOpen ? parseNum(f.lendOther) : f.lendRate) != null ? `${lendOtherOpen ? f.lendOther : f.lendRate}枚貸し` : '未選択'}>
+        <Seg<number | string>
+          value={lendOtherOpen ? 'other' : f.lendRate ?? ''}
+          onChange={(v) => {
+            if (v === 'other') { setLendOtherOpen(true); return; }
+            setLendOtherOpen(false);
+            up('lendRate')(typeof v === 'number' ? v : null);
+          }}
+          options={[...LEND_RATES.map((r) => ({ v: r as number | string, label: `${r}枚` })), { v: 'other', label: 'その他' }]}
+        />
+        {lendOtherOpen && <NumInput label="貸し枚数" value={f.lendOther} onChange={up('lendOther')} suffix="枚/1000円" />}
+        {store && prefs.storeRates[store] != null && <p className="hint">この店舗の前回値（{prefs.storeRates[store]}枚）を自動入力しています。</p>}
+      </Field>
+      <Field label="機種" value={getMachine(f.machineId).short}>
+        <Seg<string> wrap value={f.machineId} onChange={(v) => v && up('machineId')(v)} options={MACHINES.map((m) => ({ v: m.id, label: m.name, cls: 'chip' }))} />
+      </Field>
+      <div className="grid2">
+        <label className="ni"><span>日付</span><div><input type="date" value={f.date} onChange={(e) => up('date')(e.target.value)} /></div></label>
+        <label className="ni"><span>台番号</span><div><input inputMode="numeric" value={f.tableNo} placeholder="例 1625" onChange={(e) => up('tableNo')(e.target.value)} /></div></label>
+      </div>
+      <h4>着席時の台データ <small>空欄＝0（朝一の台はそのまま）</small></h4>
+      <div className="grid2">
+        <NumInput label="累計G（総回転）" value={f.seatTotalGames} onChange={up('seatTotalGames')} suffix="G" />
+        <NumInput label="表示中の当選間G" value={f.seatCurrentGames} onChange={up('seatCurrentGames')} suffix="G" />
+        <NumInput label="BIG回数" value={f.seatBig} onChange={up('seatBig')} />
+        <NumInput label="REG回数" value={f.seatReg} onChange={up('seatReg')} />
+      </div>
+      {mode === 'edit' && fresh && (
+        <Field label="リールガックン" value={f.gakkun == null ? '未記録' : f.gakkun ? 'あり' : 'なし'}>
+          <Seg value={f.gakkun} onChange={up('gakkun')} options={YN} />
+        </Field>
+      )}
+      <p className="hint">累計0Gの台は、打ち始めに「リールガックン」、1回目のBIGで「リセットフラッシュ」を入力できます。</p>
+      <NumInput label="現金投資" value={f.cashInvest} onChange={up('cashInvest')} suffix="円" />
+      <label className="memo">メモ<input value={f.memo} placeholder="任意" onChange={(e) => up('memo')(e.target.value)} /></label>
+    </Sheet>
+  );
+}
+
+function InvestSheet({ s, onClose, onSave }: { s: Session; onClose: () => void; onSave: (p: Partial<Session>) => void }) {
+  const [f, setF] = useState({ cashInvest: ns(s.cashInvest), medalsUsed: ns(s.medalsUsed), payout: ns(s.payout), finalBalance: ns(s.finalBalance) });
+  const up = (k: keyof typeof f) => (v: string) => setF({ ...f, [k]: v });
+  const cash = parseNum(f.cashInvest);
+  return (
+    <Sheet title="投資・回収" onClose={onClose} foot={<button className="primary wide" onClick={() => onSave({ cashInvest: parseNum(f.cashInvest), medalsUsed: parseNum(f.medalsUsed), payout: parseNum(f.payout), finalBalance: parseNum(f.finalBalance) })}>保存</button>}>
+      <div className="grid2">
+        <NumInput label="現金投資" value={f.cashInvest} onChange={up('cashInvest')} suffix="円" />
+        <NumInput label="使用貯メダル" value={f.medalsUsed} onChange={up('medalsUsed')} suffix="枚" />
+        <NumInput label="回収枚数" value={f.payout} onChange={up('payout')} suffix="枚" />
+        <NumInput label="最終収支（任意）" value={f.finalBalance} onChange={up('finalBalance')} suffix="円" allowMinus />
+      </div>
+      <p className="hint">
+        {s.lendRate != null && cash != null ? `${s.lendRate}枚貸し：現金${cash.toLocaleString()}円＝${Math.round((cash / 1000) * s.lendRate).toLocaleString()}枚相当。` : ''}
+        空欄は「未記録」として保存します（0とは区別）。
+      </p>
+    </Sheet>
+  );
+}
+
+function EndSheet({ s, initial, onClose, onEnd, onReopen }: { s: Session; initial: string; onClose: () => void; onEnd: (g: number, payout: number | null) => void; onReopen: () => void }) {
+  const [g, setG] = useState(initial || ns(s.endGames ?? s.midGames));
+  const [payout, setPayout] = useState(ns(s.payout));
+  const n = parseNum(g);
+  const a = aggregate(s);
+  const base = timeline(s).slice(-1)[0]?.cumTotal ?? s.seatTotalGames;
+  const preview = n == null ? null : base + (s.bonuses.length ? n : n - s.seatCurrentGames);
+  return (
+    <Sheet
+      title={s.endGames != null ? '実戦終了済み' : '実戦終了'}
+      onClose={onClose}
+      foot={
+        <>
+          {s.endGames != null && <button onClick={onReopen}>再開する</button>}
+          <button className="primary" disabled={n == null} onClick={() => n != null && onEnd(n, parseNum(payout))}>
+            {s.endGames != null ? 'ヤメGを修正' : '終了して共有へ'}
+          </button>
+        </>
+      }
+    >
+      <div className="grid2">
+        <NumInput label="ヤメ時の当選間G" value={g} onChange={setG} suffix="G" />
+        <NumInput label="回収枚数（任意）" value={payout} onChange={setPayout} suffix="枚" />
+      </div>
+      <div className="calc">
+        最終ボーナス時点 {base.toLocaleString()}G ＋ {n ?? '―'}G ＝ <b>{preview == null ? '―' : preview.toLocaleString()}G</b>
+        <div>BIG{a.big}/REG{a.reg}・🔔累計{a.bells}（{probText(a.bellRatio)}）</div>
+        <div>ヤメ時のベル累計：{s.bellPending ? s.bellTotal : '未入力（入れる場合は閉じてテンキー→🔔=累計）'}</div>
+      </div>
+    </Sheet>
+  );
+}
+
+function ShareSheet({ s, onClose, toast }: { s: Session; onClose: () => void; toast: (t: string, u?: boolean) => void }) {
+  const [mode, setMode] = useState<'simple' | 'detail'>('simple');
+  const text = mode === 'simple' ? shareSimple(s) : shareDetail(s);
+  return (
+    <Sheet
+      title="ChatGPT共有"
+      onClose={onClose}
+      foot={<button className="primary wide" onClick={async () => toast((await copyText(text)) ? `${mode === 'simple' ? '簡易' : '詳細'}形式をコピーしました` : 'コピーできませんでした。下の文字を長押しで選択してください', false)}>コピー</button>}
+    >
+      <Seg value={mode} onChange={(v) => v && setMode(v)} options={[{ v: 'simple' as const, label: '簡易' }, { v: 'detail' as const, label: '詳細（全履歴）' }]} />
+      <pre className="pre">{text}</pre>
+    </Sheet>
+  );
+}
+
+function MenuSheet(p: {
+  st: AppState; saveVia: SaveStatus; onClose: () => void; onSwitch: (id: string) => void; onNew: () => void;
+  onDelete: (id: string) => void; onSample: () => void; onRestore: (st: AppState) => void; toast: (t: string, u?: boolean) => void;
+}) {
+  const [delArm, setDelArm] = useState<string | null>(null);
+  const [paste, setPaste] = useState('');
+  const [restoreArm, setRestoreArm] = useState<AppState | null>(null);
+  const [dl, setDl] = useState<any>(null);
+  useEffect(() => {
+    const c = (window as any).claude;
+    if (c?.use) c.use('downloads').then((x: any) => setDl(x)).catch(() => setDl(null));
+  }, []);
+  const json = () => exportBackup(p.st);
+  const fname = `hanalog_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.json`;
+  const tryRestore = (text: string) => {
+    try {
+      const st = parseBackup(text);
+      setRestoreArm(st);
+    } catch (e: any) {
+      p.toast(`復元できません：${e?.message ?? '形式エラー'}`, false);
+    }
+  };
+  const sessions = [...p.st.sessions].reverse();
+  return (
+    <Sheet title="台の切替・保存" onClose={p.onClose}>
+      <button className="primary wide" onClick={p.onNew}>＋ 新しい台で実戦開始</button>
+      <h4>実戦データ（1台ずつ独立保存）</h4>
+      {sessions.length === 0 && <p className="hint">まだありません</p>}
+      {sessions.map((s) => {
+        const a = aggregate(s);
+        return (
+          <div key={s.id} className={`sess ${s.id === p.st.activeId ? 'act' : ''}`}>
+            <button className="sl" onClick={() => p.onSwitch(s.id)}>
+              <b>{s.date.replace(/-/g, '/')} {s.store || '店舗未入力'} 台{s.tableNo || '―'}</b>
+              <span>{getMachine(s.machineId).short}｜{a.total}G B{a.big}/R{a.reg}{s.endGames != null ? '｜終了' : ''}</span>
+            </button>
+            <button className={`del ${delArm === s.id ? 'arm' : ''}`} onClick={() => (delArm === s.id ? (p.onDelete(s.id), setDelArm(null)) : setDelArm(s.id))}>
+              {delArm === s.id ? '削除する' : '削除'}
+            </button>
+          </div>
+        );
+      })}
+
+      <h4>JSONバックアップ</h4>
+      <div className="btns">
+        <button onClick={async () => {
+          if (dl) {
+            try { await dl.save({ filename: fname, data: json() }); p.toast('バックアップを保存しました', false); }
+            catch { p.toast('保存がキャンセル/失敗しました。コピーを使ってください', false); }
+            return;
+          }
+          try {
+            // 通常のWebアプリ（PWA）：ファイルとしてダウンロード（iPhoneは「ファイル」に保存）
+            const url = URL.createObjectURL(new Blob([json()], { type: 'application/json' }));
+            const a = document.createElement('a');
+            a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+          } catch { p.toast('保存できませんでした。コピーを使ってください', false); }
+        }}>ファイルに保存</button>
+        <button onClick={async () => p.toast((await copyText(json())) ? 'JSONをコピーしました（メモ等に貼って保管）' : 'コピーできませんでした', false)}>JSONをコピー</button>
+      </div>
+      <h4>復元</h4>
+      <label className="file">
+        JSONファイルを選択
+        <input type="file" accept="application/json,.json,text/plain" onChange={async (e) => { const f = e.target.files?.[0]; if (f) tryRestore(await f.text()); e.target.value = ''; }} />
+      </label>
+      <textarea className="paste" placeholder="またはJSONを貼り付け" value={paste} onChange={(e) => setPaste(e.target.value)} />
+      <button disabled={!paste.trim()} onClick={() => tryRestore(paste)}>貼り付けたJSONを読込</button>
+      {restoreArm && (
+        <div className="confirm">
+          {restoreArm.sessions.length}台分のデータで現在のデータを置き換えます（取消ボタンで戻せます）。
+          <div className="btns">
+            <button onClick={() => setRestoreArm(null)}>やめる</button>
+            <button className="primary" onClick={() => p.onRestore(restoreArm)}>置き換える</button>
+          </div>
+        </div>
+      )}
+
+      <h4>テスト</h4>
+      <button onClick={p.onSample}>10/25サンプル（合成データ）を追加</button>
+      <p className="hint">
+        保存先：{p.saveVia === 'idb' ? 'この端末のブラウザ（IndexedDB＋予備）' : p.saveVia === 'local' ? 'この端末のブラウザ（localStorage）' : '保存できていません！JSONで退避してください'}。
+        ブラウザのデータ削除・別端末・別ブラウザでは引き継がれません。定期的にJSONバックアップを取ってください。
+      </p>
+    </Sheet>
   );
 }
