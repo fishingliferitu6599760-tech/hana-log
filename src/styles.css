@@ -181,3 +181,12 @@ h4 small { font-weight: 400; margin-left: 6px; }
 .ask.bellAsk button { padding: 0 14px; font-size: 13px; color: var(--sub); }
 .k.bell.hot { background: #6b5a12; color: #fff3a8; box-shadow: 0 0 0 2px #ffe066 inset; animation: hot 1.2s ease-in-out infinite; }
 @keyframes hot { 50% { box-shadow: 0 0 0 2px #ffe066 inset, 0 0 14px rgba(255,224,102,.55); } }
+
+/* v5 入力パネルの開閉 */
+.panel { padding-top: 0; }
+.grab { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0 4px; margin: 0 -10px; touch-action: none; cursor: grab; }
+.grab .bar { width: 44px; height: 5px; border-radius: 3px; background: #4a4a55; }
+.grab .gtxt { font-size: 13px; color: #cfcfd8; font-weight: 600; padding: 4px 0 2px; }
+.grab .gtxt em { font-style: normal; color: var(--warn); }
+.pbody { display: flex; flex-direction: column; gap: 7px; overflow: hidden; max-height: 640px; transition: max-height .25s ease, opacity .2s ease; }
+.panel.col .pbody { max-height: 0; opacity: 0; }

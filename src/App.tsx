@@ -60,6 +60,12 @@ export default function App() {
   const [sheet, setSheet] = useState<SheetState>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [skipBell, setSkipBell] = useState<Set<string>>(new Set());
+  // 入力パネルの開閉（つまみを下スワイプで畳んで履歴を広く表示）
+  const [collapsed, setCollapsed] = useState(false);
+  const [dragDy, setDragDy] = useState<number | null>(null);
+  const dragRef = useRef<{ y: number; moved: boolean } | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const bodyH = useRef(0);
   const stateRef = useRef<AppState | null>(null);
   const undoRef = useRef<Array<{ state: AppState; label: string }>>([]);
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
@@ -168,7 +174,57 @@ export default function App() {
             onOpen={(id) => setSheet({ kind: 'bonus', id })}
             onTail={() => setSheet({ kind: 'end' })}
           />
-          <div className="panel">
+          <div className={`panel ${collapsed ? 'col' : ''}`}>
+            <div
+              className="grab"
+              onPointerDown={(e) => {
+                dragRef.current = { y: e.clientY, moved: false };
+                if (!collapsed) bodyH.current = bodyRef.current?.scrollHeight ?? 0;
+                else bodyH.current = bodyRef.current?.scrollHeight ?? 0;
+                try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* noop */ }
+              }}
+              onPointerMove={(e) => {
+                const d = dragRef.current;
+                if (!d) return;
+                const dy = e.clientY - d.y;
+                if (Math.abs(dy) > 6) d.moved = true;
+                if (d.moved) setDragDy(dy);
+              }}
+              onPointerUp={(e) => {
+                const d = dragRef.current;
+                dragRef.current = null;
+                setDragDy(null);
+                if (!d) return;
+                const dy = e.clientY - d.y;
+                if (!d.moved) setCollapsed((c) => !c);
+                else if (!collapsed && dy > 40) setCollapsed(true);
+                else if (collapsed && dy < -30) setCollapsed(false);
+              }}
+              onPointerCancel={() => { dragRef.current = null; setDragDy(null); }}
+            >
+              <span className="bar" />
+              {collapsed && (
+                <span className="gtxt">
+                  ▲ 入力を開く　現在{aggregate(session).counter}G・🔔{aggregate(session).bells}
+                  {bellFor || latestPending ? <em>・未入力あり</em> : null}
+                </span>
+              )}
+            </div>
+            <div
+              className="pbody"
+              ref={bodyRef}
+              style={
+                dragDy == null
+                  ? undefined
+                  : {
+                      transition: 'none',
+                      opacity: 1,
+                      maxHeight: collapsed
+                        ? Math.min(bodyH.current, Math.max(0, -dragDy))
+                        : Math.max(0, bodyH.current - Math.max(0, dragDy)),
+                    }
+              }
+            >
             {canAskGakkun(session) && session.gakkun == null && (
               <div className="ask">
                 <span>リールガックン</span>
@@ -194,6 +250,7 @@ export default function App() {
               <button className="regBtn" onClick={() => regBonus('REG')}>REG</button>
             </div>
             <BellRow s={session} />
+            </div>
             <nav className="foot">
               <button onClick={undo}>↶<small>取消</small></button>
               <button onClick={() => setSheet({ kind: 'invest' })}>¥<small>投資</small></button>
