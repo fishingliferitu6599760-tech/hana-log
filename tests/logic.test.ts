@@ -13,6 +13,7 @@ import type { AppState } from '../src/types';
 const s0 = (machineId = 'new-king-v30') => newSession({ store: 'テスト店', tableNo: '1', machineId });
 const NK = getMachine('new-king-v30');
 const STAR = getMachine('star-30');
+void STAR;
 
 describe('機種定義', () => {
   it('ニューハナハナゴールドは選択肢にない', () => {
@@ -58,12 +59,12 @@ describe('1-2. 仮登録と二重加算防止', () => {
     expect(a.bigSide.counts.red).toBe(1);
     expect(a.bigSide.counts.green).toBe(0);
   });
-  it('REGもレトロ権利が入力完了の条件', () => {
-    let s = addBonus(s0(), 'REG', 50);
-    s = updateBonus(s, s.bonuses[0].id, { suika: 0, end: 'white' });
-    expect(isComplete(s.bonuses[0], NK)).toBe(false);
+  it('手動ルール機種（スター）はREGもレトロ権利が入力完了の条件', () => {
+    let s = addBonus(s0('star-30'), 'REG', 50);
+    s = updateBonus(s, s.bonuses[0].id, { side: 'blue', end: 'white' });
+    expect(isComplete(s.bonuses[0], STAR, s)).toBe(false);
     s = updateBonus(s, s.bonuses[0].id, { retroRight: false });
-    expect(isComplete(s.bonuses[0], NK)).toBe(true);
+    expect(isComplete(s.bonuses[0], STAR, s)).toBe(true);
   });
 });
 
@@ -224,7 +225,10 @@ describe('13. サンプル実戦（10/25）の最終値', () => {
     expect(a.bigSide.counts).toMatchObject({ blue: 6, yellow: 4, green: 3, red: 3, rainbow: 0 });
     expect(a.bigEnd.counts).toMatchObject({ white: 15, blue: 1 });
     expect(a.regEnd.counts).toMatchObject({ white: 14, blue: 1 });
-    expect([a.bigRetroRight.yes, a.bigRetroActual.yes]).toEqual([16, 1]);
+    // 権利は自動判定（暫定ルール）。サンプルの旧手動記録（BIG全16件あり）は保持され、食い違いとして数える
+    expect([a.bigRetro.right.yes, a.bigRetro.right.no, a.bigRetro.actual.yes]).toEqual([1, 15, 1]);
+    expect(a.bigRetro.mismatch).toBe(15);
+    expect(s.bonuses.filter((b) => b.type === 'BIG').every((b) => b.retroRight === true)).toBe(true);
     expect(s.endGames).toBe(284);
   });
   it('10. 簡易共有テキスト', () => {
@@ -233,7 +237,7 @@ describe('13. サンプル実戦（10/25）の最終値', () => {
         '日付：2026/10/25', '店舗：タイホウ篭山', '台番：1625', '機種：ニューキングV-30', '',
         '累計6049G｜B16/R15｜🔔876(1/6.9)｜🍉B10/R3', '',
         'BIG後半：🟦6🟡4🟢3🟥3🌈0', 'BIG終了：🤍15🟦1', 'REG終了：🤍14🟦1',
-        'レトロ：BIG権利16/発生1・REG権利0/発生0',
+        'レトロ：BIG権利1/発生1・REG権利0/発生0（権利は自動判定・暫定）',
       ].join('\n'),
     );
   });
@@ -244,7 +248,8 @@ describe('13. サンプル実戦（10/25）の最終値', () => {
     expect(rows[0]).toMatch(/^1\|\d\d:\d\d\|REG\|14\|14\|2\|2\|1\/7\.0\|0\|-\|🤍/);
     expect(rows[30]).toMatch(/\|BIG\|407\|5765\|/);
     expect(t).toContain('最終ハマリ：284G（ヤメ）');
-    expect(t).toContain('BIGレトロ権利：あり16・なし0・未記録0／実発生：あり1・なし15・未記録0');
+    expect(t).toContain('BIGレトロ権利：あり1・なし15・不明0／実発生：あり1・なし15・未記録0');
+    expect(t).toContain('旧手動の権利記録と自動判定が異なる当選：15件');
     expect(t).toMatch(/ヤメ\|\d\d:\d\d\|-\|284\|6049\|876\|\d+\|1\//);
   });
 });

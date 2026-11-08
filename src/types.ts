@@ -12,6 +12,10 @@ export type LampValue = LampColor | typeof MISS | null | NotApplicable;
 export type SuikaValue = 0 | 1 | 2 | 3 | null | NotApplicable;
 export type YesNo = boolean | null | NotApplicable;
 export type BonusType = 'BIG' | 'REG';
+/** ボーナス中BGM：通常／レトロ／大連続／未確認（聞き取れなかった等）。null = 未記録 */
+export type Bgm = 'normal' | 'retro' | 'big_chain' | 'unconfirmed' | null;
+/** リセットフラッシュ：あり／なし／未確認。null = 未記録 */
+export type ResetFlash = boolean | 'unconfirmed' | null;
 
 export interface Bonus {
   id: string;
@@ -25,8 +29,14 @@ export interface Bonus {
   suika: SuikaValue;
   side: LampValue;
   end: LampValue;
+  /** レトロ権利の手動記録（旧方式・自動判定ルールがない機種用）。自動判定機種では新規入力しない */
   retroRight: YesNo;
+  /** レトロ実発生（あり/なし/未記録）。BGM入力から自動で設定 */
   retroActual: YesNo;
+  /** ボーナス中BGM */
+  bgm: Bgm;
+  /** リセットフラッシュ時のランプ色（任意。通常の終了ランプ集計には含めない） */
+  rfLamp: LampColor | null;
   memo: string;
 }
 
@@ -47,7 +57,7 @@ export interface Session {
   /** リールガックン（累計0G台のみ） */
   gakkun: boolean | null;
   /** リセットフラッシュ（累計0G台の1回目BIGのみ） */
-  resetFlash: boolean | null;
+  resetFlash: ResetFlash;
   cashInvest: number | null;
   medalsUsed: number | null;
   payout: number | null;

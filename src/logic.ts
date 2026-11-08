@@ -1,6 +1,7 @@
 import { getMachine, LAMP_EMOJI, MISS_EMOJI, type BonusSpec, type FieldSpec, type MachineDef } from './machines';
+import { BGM_LABEL, computeRetro, effectiveRight, isZeroStart, manualMismatch, actualFromBgm, type RetroAuto } from './retro';
 import {
-  MISS, NA, type AppState, type Bonus, type BonusType, type LampColor, type LampValue, type Prefs, type Session,
+  MISS, NA, type AppState, type Bgm, type ResetFlash, type Bonus, type BonusType, type LampColor, type LampValue, type Prefs, type Session,
   type SuikaValue, type YesNo,
 } from './types';
 
@@ -46,6 +47,8 @@ export function newBonus(m: MachineDef, type: BonusType, games: number, bellsAt:
     end: init(sp.end) as LampValue,
     retroRight: init(sp.retro) as YesNo,
     retroActual: init(sp.retro) as YesNo,
+    bgm: null,
+    rfLamp: null,
   };
 }
 
@@ -186,15 +189,16 @@ export function bellRatioTotal(s: Session): number | null {
 }
 
 // ---------- 集計 ----------
-export interface LampCount { counts: Record<LampColor, number>; miss: number; unrecorded: number; na: number; total: number }
+export interface LampCount { counts: Record<LampColor, number>; miss: number; unrecorded: number; na: number; total: number; excluded: number }
 export interface SuikaAgg { sum: number; recorded: number; unrecorded: number; na: number; plus: number }
 export interface YesNoAgg { yes: number; no: number; unrecorded: number; na: number }
 
 const zeroLamp = (): Record<LampColor, number> => ({ white: 0, blue: 0, yellow: 0, green: 0, red: 0, purple: 0, rainbow: 0 });
 
-function countLamp(list: Bonus[], key: 'side' | 'end'): LampCount {
-  const r: LampCount = { counts: zeroLamp(), miss: 0, unrecorded: 0, na: 0, total: list.length };
+function countLamp(list: Bonus[], key: 'side' | 'end', exclude: Set<string> = new Set()): LampCount {
+  const r: LampCount = { counts: zeroLamp(), miss: 0, unrecorded: 0, na: 0, total: list.length, excluded: 0 };
   for (const b of list) {
+    if (exclude.has(b.id)) { r.excluded++; continue; }
     const v = b[key];
     if (v === null) r.unrecorded++;
     else if (v === NA) r.na++;
@@ -224,10 +228,42 @@ function countYN(list: Bonus[], key: 'retroRight' | 'retroActual'): YesNoAgg {
   return r;
 }
 
+export interface RetroAgg { right: { yes: number; no: number; unknown: number; unrecorded: number }; actual: YesNoAgg; bgm: Record<Exclude<Bgm, null>, number> & { unrecorded: number }; mismatch: number }
+
+function countRetro(list: Bonus[], autoMap: Map<string, RetroAuto>): RetroAgg {
+  const r: RetroAgg = {
+    right: { yes: 0, no: 0, unknown: 0, unrecorded: 0 },
+    actual: countYN(list, 'retroActual'),
+    bgm: { normal: 0, retro: 0, big_chain: 0, unconfirmed: 0, unrecorded: 0 },
+    mismatch: 0,
+  };
+  for (const b of list) {
+    const auto = autoMap.get(b.id);
+    const e = effectiveRight(b, auto);
+    if (e === null) r.right.unrecorded++;
+    else r.right[e]++;
+    if (b.bgm) r.bgm[b.bgm]++;
+    else r.bgm.unrecorded++;
+    if (manualMismatch(b, auto)) r.mismatch++;
+  }
+  return r;
+}
+
+/** リセットフラッシュありの初回BIG（通常の終了ランプ集計から除外する） */
+export function resetFlashBonusIds(s: Session): Set<string> {
+  const ids = new Set<string>();
+  if (s.resetFlash !== true) return ids;
+  const first = s.bonuses.find((b) => b.type === 'BIG');
+  if (first && isFreshMachine(s)) ids.add(first.id);
+  return ids;
+}
+
 export function aggregate(s: Session) {
   const bigs = s.bonuses.filter((b) => b.type === 'BIG');
   const regs = s.bonuses.filter((b) => b.type === 'REG');
   const total = totalGames(s);
+  const autoMap = computeRetro(s, getMachine(s.machineId));
+  const rfIds = resetFlashBonusIds(s);
   return {
     total, myGames: total - s.seatTotalGames,
     myBig: bigs.length, myReg: regs.length,
@@ -235,23 +271,35 @@ export function aggregate(s: Session) {
     bells: totalBells(s), bellRatio: bellRatioTotal(s),
     bigSuika: countSuika(bigs), regSuika: countSuika(regs),
     bigSide: countLamp(bigs, 'side'), regSide: countLamp(regs, 'side'),
-    bigEnd: countLamp(bigs, 'end'), regEnd: countLamp(regs, 'end'),
-    bigRetroRight: countYN(bigs, 'retroRight'), bigRetroActual: countYN(bigs, 'retroActual'),
-    regRetroRight: countYN(regs, 'retroRight'), regRetroActual: countYN(regs, 'retroActual'),
+    bigEnd: countLamp(bigs, 'end', rfIds), regEnd: countLamp(regs, 'end'),
+    bigRetro: countRetro(bigs, autoMap), regRetro: countRetro(regs, autoMap),
     counter: currentCounter(s),
   };
 }
 
-/** 詳細記録がすべて埋まっているか（対応項目のみ必須。未確認・非対応は必須にしない） */
-export function isComplete(b: Bonus, m: MachineDef): boolean {
+/**
+ * 詳細記録がすべて埋まっているか（対応項目のみ必須。未確認・非対応は必須にしない）。
+ * s を渡すとレトロ自動判定・リセットフラッシュを考慮する。
+ *  - 自動判定機種：権利の入力は不要。権利あり／不明の当選だけBGM（実発生）を必須
+ *  - リセットフラッシュありの初回BIG：終了ランプを必須にしない
+ */
+export function isComplete(b: Bonus, m: MachineDef, s?: Session): boolean {
   const sp = specOf(m, b.type);
   const need = (f: FieldSpec) => f.support === 'supported';
+  const rf = s ? resetFlashBonusIds(s).has(b.id) : false;
   if (need(sp.suika) && b.suika === null) return false;
   if (need(sp.side) && b.side === null) return false;
-  if (need(sp.end) && b.end === null) return false;
+  if (need(sp.end) && b.end === null && !rf) return false;
   if (need(sp.retro)) {
-    if (b.retroRight === null) return false;
-    if (b.retroRight === true && b.retroActual === null) return false;
+    const actualDone = b.bgm !== null || b.retroActual !== null;
+    if (m.retroRule) {
+      const auto = s ? computeRetro(s, m).get(b.id) : undefined;
+      const r = auto?.right ?? 'unknown';
+      if ((r === 'yes' || r === 'unknown') && !actualDone) return false;
+    } else {
+      if (b.retroRight === null) return false;
+      if (b.retroRight === true && !actualDone) return false;
+    }
   }
   return true;
 }
@@ -271,10 +319,23 @@ export const canAskGakkun = (s: Session): boolean =>
 // ---------- 状態変更（純関数。すべて新しい Session を返す） ----------
 const touch = (s: Session): Session => ({ ...s, updatedAt: new Date().toISOString() });
 
-/** ボーナス仮登録。直前に入力したベル累計をこの当選に記録。途中保存・ヤメは解除 */
-export function addBonus(s: Session, type: BonusType, games: number, at?: string): Session {
-  const b = newBonus(getMachine(s.machineId), type, games, s.bellPending ? s.bellTotal : null, at);
-  return touch({ ...s, bonuses: [...s.bonuses, b], bellPending: false, midGames: null, midAt: null, endGames: null, endedAt: null });
+/**
+ * ボーナス登録（一括・原子的）。G数・種別・ベル累計を1件の当選として同時に保存する。
+ * bells を渡せばその値、無ければ事前に入力済み（bellPending）の累計、どちらも無ければ未記録(null)。
+ * 前回の累計を新しい当選へ勝手にコピーしない。途中保存・ヤメは解除。
+ */
+export function addBonus(s: Session, type: BonusType, games: number, at?: string, bells?: number | null): Session {
+  const bellsAt = bells != null ? Math.max(0, Math.floor(bells)) : s.bellPending ? s.bellTotal : null;
+  const b = newBonus(getMachine(s.machineId), type, games, bellsAt, at);
+  return touch({
+    ...s, bonuses: [...s.bonuses, b],
+    bellTotal: bells != null ? bellsAt : s.bellTotal, bellPending: false,
+    midGames: null, midAt: null, endGames: null, endedAt: null,
+  });
+}
+/** BGMを記録（レトロ実発生も連動して設定。権利の記録は変更しない） */
+export function setBgm(s: Session, id: string, bgm: Bgm): Session {
+  return updateBonus(s, id, { bgm, retroActual: actualFromBgm(bgm) });
 }
 export function updateBonus(s: Session, id: string, patch: Partial<Bonus>): Session {
   return touch({ ...s, bonuses: s.bonuses.map((b) => (b.id === id ? { ...b, ...patch, id: b.id } : b)) });
@@ -322,6 +383,9 @@ export const lampText = (v: LampValue): string =>
 export const ynText = (v: YesNo): string => (v === null ? '未記録' : v === NA ? '-' : v ? 'あり' : 'なし');
 const numOr = (v: number | null, unit = ''): string => (v == null ? '未記録' : `${v.toLocaleString('ja-JP')}${unit}`);
 const ynOr = (v: boolean | null) => (v == null ? '未記録' : v ? 'あり' : 'なし');
+export const rfText = (v: ResetFlash) => (v == null ? '未記録' : v === 'unconfirmed' ? '未確認' : v ? 'あり' : 'なし');
+const rightText = (r: 'yes' | 'no' | 'unknown' | null) => (r == null ? '未記録' : r === 'yes' ? 'あり' : r === 'no' ? 'なし' : '不明');
+const bgmText = (b: Bonus) => (b.bgm ? BGM_LABEL[b.bgm] : b.retroActual === true ? '(旧)レトロ発生' : b.retroActual === false ? '(旧)発生なし' : b.retroActual === NA ? '-' : '未記録');
 
 /** ランプ集計1行。palette順（showZero=false なら0件の色は省略） */
 export function lampLine(c: LampCount, palette: LampColor[], showZero: boolean): string {
@@ -360,7 +424,9 @@ export function shareSimple(s: Session): string {
   if (used(m.reg.side)) lines.push(`REG中サイド：${lampLine(a.regSide, m.reg.side.colors ?? [], true)}`);
   lines.push(`BIG終了：${lampLine(a.bigEnd, m.big.end.colors ?? [], false)}`);
   lines.push(`REG終了：${lampLine(a.regEnd, m.reg.end.colors ?? [], false)}`);
-  lines.push(`レトロ：BIG権利${a.bigRetroRight.yes}/発生${a.bigRetroActual.yes}・REG権利${a.regRetroRight.yes}/発生${a.regRetroActual.yes}`);
+  const rr = (x: RetroAgg) => `権利${x.right.yes}${x.right.unknown ? `(不明${x.right.unknown})` : ''}/発生${x.actual.yes}`;
+  lines.push(`レトロ：BIG${rr(a.bigRetro)}・REG${rr(a.regRetro)}${m.retroRule ? '（権利は自動判定・暫定）' : ''}`);
+  if (a.bigRetro.bgm.big_chain + a.regRetro.bgm.big_chain) lines.push(`大連続BGM：${a.bigRetro.bgm.big_chain + a.regRetro.bgm.big_chain}回`);
   return lines.join('\n');
 }
 
@@ -371,6 +437,9 @@ export function shareDetail(s: Session): string {
   const sa = (x: SuikaAgg) =>
     `${x.recorded === 0 && x.unrecorded > 0 ? '未記録' : `${x.sum}回`}${x.plus ? `（3回以上を3として${x.plus}件含む）` : ''}［記録${x.recorded}/未記録${x.unrecorded}］`;
   const yn = (x: YesNoAgg) => `あり${x.yes}・なし${x.no}・未記録${x.unrecorded}`;
+  const rgt = (x: RetroAgg) => `あり${x.right.yes}・なし${x.right.no}・不明${x.right.unknown}${x.right.unrecorded ? `・未記録${x.right.unrecorded}` : ''}`;
+  const autoMap = computeRetro(s, m);
+  const rfIds = resetFlashBonusIds(s);
   const status = s.endGames != null ? `実戦終了（${hhmm(s.endedAt)}）` : '実戦中';
   const lastHamari =
     s.endGames != null ? `${s.endGames}G（ヤメ）` : s.midGames != null ? `${s.midGames}G（途中保存 ${hhmm(s.midAt)}）` : `${a.counter}G（途中保存なし）`;
@@ -387,7 +456,7 @@ export function shareDetail(s: Session): string {
     '',
     '■着席時（自分の実戦前の値）',
     `累計${s.seatTotalGames}G／表示当選間${s.seatCurrentGames}G／BIG${s.seatBig}・REG${s.seatReg}`,
-    fresh ? `リールガックン：${ynOr(s.gakkun)}／リセットフラッシュ（1回目BIG）：${ynOr(s.resetFlash)}` : 'リールガックン・リセットフラッシュ：対象外（累計0Gの台ではない）',
+    fresh ? `リールガックン：${ynOr(s.gakkun)}／リセットフラッシュ（1回目BIG）：${rfText(s.resetFlash)}` : 'リールガックン・リセットフラッシュ：対象外（累計0Gの台ではない）',
     '',
     '■集計',
     `累計${a.total}G（うち自分の実戦${a.myGames}G）`,
@@ -401,26 +470,33 @@ export function shareDetail(s: Session): string {
   lines.push(
     `${m.big.end.label}：${lampLine(a.bigEnd, m.big.end.colors ?? [], true)}`,
     `${m.reg.end.label}：${lampLine(a.regEnd, m.reg.end.colors ?? [], true)}`,
-    `BIGレトロ権利：${yn(a.bigRetroRight)}／実発生：${yn(a.bigRetroActual)}`,
-    `REGレトロ権利：${yn(a.regRetroRight)}／実発生：${yn(a.regRetroActual)}`,
+    `レトロ権利の判定：${m.retroRule ? '自動（ニューキングV暫定ルール：外部解析ベース・公式未確認）' : '手動記録（この機種は自動判定ルール未設定）'}`,
+    `BIGレトロ権利：${rgt(a.bigRetro)}／実発生：${yn(a.bigRetro.actual)}`,
+    `REGレトロ権利：${rgt(a.regRetro)}／実発生：${yn(a.regRetro.actual)}`,
+    `BGM：通常${a.bigRetro.bgm.normal + a.regRetro.bgm.normal}・レトロ${a.bigRetro.bgm.retro + a.regRetro.bgm.retro}・大連続${a.bigRetro.bgm.big_chain + a.regRetro.bgm.big_chain}・未確認${a.bigRetro.bgm.unconfirmed + a.regRetro.bgm.unconfirmed}・未記録${a.bigRetro.bgm.unrecorded + a.regRetro.bgm.unrecorded}`,
+    ...(a.bigRetro.mismatch + a.regRetro.mismatch ? [`※旧手動の権利記録と自動判定が異なる当選：${a.bigRetro.mismatch + a.regRetro.mismatch}件（履歴の「旧手動」列参照）`] : []),
+    ...(a.bigEnd.excluded ? [`※リセットフラッシュありの初回BIG ${a.bigEnd.excluded}件は終了ランプ集計から除外`] : []),
     `最終ハマリ：${lastHamari}`,
     '',
     '■投資・回収',
     `現金投資：${numOr(s.cashInvest, '円')}／使用貯メダル：${numOr(s.medalsUsed, '枚')}／回収：${numOr(s.payout, '枚')}／最終収支：${s.finalBalance == null ? '未記録' : `${s.finalBalance > 0 ? '+' : ''}${s.finalBalance.toLocaleString('ja-JP')}円`}`,
     '',
     '■当選履歴（古い順）',
-    'No|時刻|種別|当選G|累計G|ベル累計|ボーナス間ベル|ベル確率|スイカ|サイド|終了|レトロ権利|レトロ発生|メモ',
+    'No|時刻|種別|当選G|累計G|ベル累計|ボーナス間ベル|ベル確率|スイカ|サイド|終了|レトロ権利|旧手動権利|BGM|レトロ発生|メモ',
     ...rows.map((r) => {
       const b = r.bonus;
       return [
         r.no, hhmm(b.at), b.type, b.games, r.cumTotal, b.bellsAt ?? '未記録', diffText(r), probText(r.bellRatio), suikaText(b.suika),
-        lampText(b.side), lampText(b.end), ynText(b.retroRight), ynText(b.retroActual), b.memo.replace(/[|\n]/g, ' '),
+        lampText(b.side), rfIds.has(b.id) ? `リセフラ${b.rfLamp ? LAMP_EMOJI[b.rfLamp] : ''}(集計外)` : lampText(b.end),
+        rightText(effectiveRight(b, autoMap.get(b.id))),
+        m.retroRule ? (b.retroRight === true || b.retroRight === false ? `${ynText(b.retroRight)}${manualMismatch(b, autoMap.get(b.id)) ? '≠自動' : ''}` : '-') : '-',
+        bgmText(b), ynText(b.retroActual), b.memo.replace(/[|\n]/g, ' '),
       ].join('|');
     }),
   );
   const bt = bellTail(s);
   const tailRow = (label: string, at: string | null, g: number) =>
-    `${label}|${hhmm(at)}|-|${g}|${a.total}|${s.bellPending ? s.bellTotal : '未記録'}|${bt.diff ?? '-'}|${probText(bt.ratio)}|-|-|-|-|-|`;
+    `${label}|${hhmm(at)}|-|${g}|${a.total}|${s.bellPending ? s.bellTotal : '未記録'}|${bt.diff ?? '-'}|${probText(bt.ratio)}|-|-|-|-|-|-|-|`;
   if (s.endGames != null) lines.push(tailRow('ヤメ', s.endedAt, s.endGames));
   else if (s.midGames != null) lines.push(tailRow('途中', s.midAt, s.midGames));
   if (s.memo) lines.push('', `メモ：${s.memo}`);
@@ -461,6 +537,8 @@ export function normalizeSession(raw: any): Session {
           end: isLamp(b.end) ? b.end : null,
           retroRight: isYN(b.retroRight) ? b.retroRight : null,
           retroActual: isYN(b.retroActual) ? b.retroActual : null,
+          bgm: ['normal', 'retro', 'big_chain', 'unconfirmed'].includes(b.bgm) ? b.bgm : null,
+          rfLamp: ['white', 'blue', 'yellow', 'green', 'red', 'purple', 'rainbow'].includes(b.rfLamp) ? b.rfLamp : null,
           memo: typeof b.memo === 'string' ? b.memo : '',
         }))
     : [];
@@ -473,7 +551,7 @@ export function normalizeSession(raw: any): Session {
     lendRate: numN(raw?.lendRate),
     seatTotalGames: numN(raw?.seatTotalGames) ?? 0, seatCurrentGames: numN(raw?.seatCurrentGames) ?? 0,
     seatBig: numN(raw?.seatBig) ?? 0, seatReg: numN(raw?.seatReg) ?? 0,
-    gakkun: boolN(raw?.gakkun), resetFlash: boolN(raw?.resetFlash),
+    gakkun: boolN(raw?.gakkun), resetFlash: raw?.resetFlash === 'unconfirmed' ? 'unconfirmed' : boolN(raw?.resetFlash),
     cashInvest: numN(raw?.cashInvest), medalsUsed: numN(raw?.medalsUsed), payout: numN(raw?.payout),
     finalBalance: numN(raw?.finalBalance),
     ...migrateBells(raw, bonuses),
@@ -522,6 +600,6 @@ export function parseBackup(text: string): AppState {
   const st = j?.app === 'HANA LOG' ? j.state : j; // 素の AppState も受け付ける
   if (!st || !Array.isArray(st.sessions)) throw new Error('HANA LOGのバックアップ形式ではありません');
   const sessions = st.sessions.map(normalizeSession);
-  const activeId = sessions.some((s: Session) => s.id === st.activeId) ? st.activeId : sessions[0]?.id ?? null;
+  const activeId = sessions.some((s: Session) => s.id === st.activeId) ? st.activeId : null;
   return { version: 1, sessions, activeId, prefs: normalizePrefs(st.prefs) };
 }

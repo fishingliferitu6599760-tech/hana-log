@@ -19,10 +19,14 @@ export interface FieldSpec {
 
 export interface BonusSpec { suika: FieldSpec; side: FieldSpec; end: FieldSpec; retro: FieldSpec }
 
+/** レトロ権利の自動判定ルール。未確認機種は null（手動入力） */
+export type RetroRule = 'nkv-provisional' | null;
+
 export interface MachineDef {
   id: string;
   name: string;
   short: string;
+  retroRule: RetroRule;
   big: BonusSpec;
   reg: BonusSpec;
 }
@@ -33,7 +37,7 @@ const RETRO: FieldSpec = { support: 'supported', label: 'レトロサウンド' 
 
 /** スター・キング・ドラゴン・ホウオウ共通（シゲヒロさん指定の仕様） */
 const standard = (id: string, name: string, short: string): MachineDef => ({
-  id, name, short,
+  id, name, short, retroRule: null,
   big: {
     suika: { support: 'supported', label: 'BIG中スイカ' },
     side: NA_F('BIG中サイド'),
@@ -53,6 +57,8 @@ export const MACHINES: MachineDef[] = [
     id: 'new-king-v30',
     name: 'ニューキングハナハナV-30',
     short: 'ニューキングV-30',
+    // 外部解析資料に基づく暫定ルール（公式仕様ではない）
+    retroRule: 'nkv-provisional',
     big: {
       suika: { support: 'supported', label: 'BIG前半スイカ' },
       side: { support: 'supported', label: 'BIG後半サイドランプ', colors: SIDE5, miss: true },

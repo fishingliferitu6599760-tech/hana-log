@@ -44,13 +44,13 @@ export function buildSample(): Session {
       return {
         id: `s${i + 1}`, type: 'BIG', games: g, bellsAt: cumBells[i], at, memo: '',
         suika: BIG_SUIKA[j] as 0 | 1 | 2, side: BIG_SIDE[j], end: BIG_END[j],
-        retroRight: true, retroActual: BIG_RETRO_ACTUAL[j],
+        retroRight: true, retroActual: BIG_RETRO_ACTUAL[j], bgm: null, rfLamp: null,
       };
     }
     const j = ri++;
     return {
       id: `s${i + 1}`, type: 'REG', games: g, bellsAt: cumBells[i], at, memo: '',
-      suika: REG_SUIKA[j] as 0 | 1, side: NA, end: REG_END[j], retroRight: false, retroActual: false,
+      suika: REG_SUIKA[j] as 0 | 1, side: NA, end: REG_END[j], retroRight: false, retroActual: false, bgm: null, rfLamp: null,
     };
   });
   return newSession({
