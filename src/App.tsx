@@ -8,6 +8,7 @@ import {
   shareSimple, specOf, timeline, updateBonus, type TimelineRow,
 } from './logic';
 import { buildSample } from './sample';
+import { AnalysisBoundary, AnalysisView } from './Analysis';
 import { lastEndedSession, latestSession, nextSessionSameStore, unfinishedSessions } from './home';
 import { BGM_LABEL, computeRetro, manualMismatch, type RetroAuto } from './retro';
 import { loadState, saveState, type SaveStatus } from './storage';
@@ -69,6 +70,7 @@ export default function App() {
   const [view, setView] = useState<'home' | 'play' | 'review'>('home');
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [setupBase, setSetupBase] = useState<Session | null>(null);
+  const [anaOpen, setAnaOpen] = useState(false);
   // 入力パネルの開閉（つまみを下スワイプで畳んで履歴を広く表示）
   const [collapsed, setCollapsed] = useState(false);
   const [dragDy, setDragDy] = useState<number | null>(null);
@@ -148,7 +150,7 @@ export default function App() {
   const session = state.sessions.find((s) => s.id === curId) ?? null;
 
   // ---------- 画面遷移 ----------
-  const goHome = () => { setSheet(null); setView('home'); setGBuf(''); setBellBuf(''); setField('g'); };
+  const goHome = () => { setSheet(null); setAnaOpen(false); setView('home'); setGBuf(''); setBellBuf(''); setField('g'); };
   const openSession = (id: string) => {
     const s = state.sessions.find((x) => x.id === id);
     if (!s) return;
@@ -262,6 +264,7 @@ export default function App() {
               <button onClick={goHome}>⌂<small>ホーム</small></button>
               <button onClick={undo}>↶<small>取消</small></button>
               <button className="share" onClick={() => setSheet({ kind: 'share' })}>⇪<small>共有</small></button>
+              <button className="ana-btn" onClick={() => setAnaOpen(true)}>📈<small>分析</small></button>
               <button onClick={() => setSheet({ kind: 'invest' })}>¥<small>投資</small></button>
               <button onClick={() => setSheet({ kind: 'end' })}>▶<small>再開</small></button>
             </nav>
@@ -332,11 +335,18 @@ export default function App() {
               <button onClick={undo}>↶<small>取消</small></button>
               <button onClick={() => setSheet({ kind: 'invest' })}>¥<small>投資</small></button>
               <button className="share" onClick={() => setSheet({ kind: 'share' })}>⇪<small>共有</small></button>
+              <button className="ana-btn" onClick={() => setAnaOpen(true)}>📈<small>分析</small></button>
               <button onClick={() => setSheet({ kind: 'end' })}>■<small>終了</small></button>
               <button onClick={goHome}>⌂<small>ホーム</small></button>
             </nav>
           </div>
         </>
+      )}
+
+      {anaOpen && session && view !== 'home' && (
+        <AnalysisBoundary onClose={() => setAnaOpen(false)}>
+          <AnalysisView s={session} onClose={() => setAnaOpen(false)} />
+        </AnalysisBoundary>
       )}
 
       {toast && (
