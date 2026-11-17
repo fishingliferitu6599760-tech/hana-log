@@ -50,9 +50,11 @@ function makeScale(x0: number, x1: number, y0: number, y1: number): Scale {
 /** 軸・グリッド・タップ受け取りを持つ共通フレーム */
 function Frame(p: {
   x0: number; x1: number; y0: number; y1: number; yFmt?: (v: number) => string; xLabel?: string;
+  /** true：縦軸を反転（値が小さい＝確率が良い方を上） */
+  invert?: boolean;
   onTap?: (x: number) => void; cursorX?: number | null; children: (sc: Scale) => ReactNode;
 }) {
-  const sc = makeScale(p.x0, p.x1, p.y0, p.y1);
+  const sc = p.invert ? makeScale(p.x0, p.x1, p.y1, p.y0) : makeScale(p.x0, p.x1, p.y0, p.y1);
   const xt = niceTicks(p.x0, p.x1, 4);
   const yt = niceTicks(p.y0, p.y1, 4);
   const tap = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -76,6 +78,7 @@ function Frame(p: {
       {p.children(sc)}
       {p.cursorX != null && <line x1={sc.x(p.cursorX)} x2={sc.x(p.cursorX)} y1={PAD.t} y2={PAD.t + IH} className="cursor" />}
       {p.xLabel && <text x={W - PAD.r} y={PAD.t + IH - 4} className="axlabel" textAnchor="end">{p.xLabel}</text>}
+      {p.invert && <text x={PAD.l + 4} y={PAD.t + 9} className="axlabel">↑良好</text>}
     </svg>
   );
 }
@@ -144,6 +147,40 @@ function BonusChart({ bs }: { bs: BonusSeries }) {
 }
 
 /** 確率(1/X)の折れ線。cut=true の区間は破線（観測していない区間） */
+/**
+ * 単調3次補間（Fritsch–Carlson／d3.curveMonotoneX と同じ方式）の各区間ベジェ。
+ * 各区間の曲線は両端の観測値の範囲内に収まり、実測値を超える山や谷を作らない。
+ * 観測点そのものの位置は変えない。
+ */
+export function monotoneSegments(px: Array<{ x: number; y: number }>): string[] {
+  const n = px.length;
+  if (n < 2) return [];
+  const h: number[] = [];
+  const sl: number[] = [];
+  for (let k = 0; k < n - 1; k++) {
+    h.push(px[k + 1].x - px[k].x);
+    sl.push(h[k] > 0 ? (px[k + 1].y - px[k].y) / h[k] : 0);
+  }
+  const m: number[] = new Array(n).fill(0);
+  for (let k = 1; k < n - 1; k++) {
+    const s0 = sl[k - 1], s1 = sl[k], h0 = h[k - 1], h1 = h[k];
+    if (s0 * s1 <= 0 || h0 <= 0 || h1 <= 0) { m[k] = 0; continue; }
+    const pp = (s0 * h1 + s1 * h0) / (h0 + h1);
+    m[k] = (Math.sign(s0) + Math.sign(s1)) * Math.min(Math.abs(s0), Math.abs(s1), 0.5 * Math.abs(pp));
+  }
+  const end = (s: number, t: number) => { const v = (3 * s - t) / 2; return s === 0 || Math.sign(v) !== Math.sign(s) ? 0 : Math.abs(v) > 3 * Math.abs(s) ? 3 * s : v; };
+  m[0] = n === 2 ? sl[0] : end(sl[0], m[1]);
+  m[n - 1] = n === 2 ? sl[n - 2] : end(sl[n - 2], m[n - 2]);
+  const segs: string[] = [];
+  for (let k = 0; k < n - 1; k++) {
+    const a = px[k], b = px[k + 1], d = h[k] / 3;
+    segs.push(d > 0
+      ? `M${a.x},${a.y} C${a.x + d},${a.y + m[k] * d} ${b.x - d},${b.y - m[k + 1] * d} ${b.x},${b.y}`
+      : `M${a.x},${a.y} L${b.x},${b.y}`);
+  }
+  return segs;
+}
+
 function RatioChart(p: {
   pts: Array<Pt & { cut?: boolean; label?: string }>; color: string; name: string; note: string; tipFmt: (pt: Pt & { label?: string }) => ReactNode;
   x0: number; x1: number; markers?: boolean;
@@ -156,7 +193,7 @@ function RatioChart(p: {
   return (
     <div>
       <Frame
-        x0={p.x0} x1={Math.max(p.x1, p.x0 + 1)} y0={lo} y1={hi} yFmt={(v) => `1/${v}`} xLabel="累計G"
+        x0={p.x0} x1={Math.max(p.x1, p.x0 + 1)} y0={lo} y1={hi} yFmt={(v) => `1/${v}`} xLabel="累計G" invert
         cursorX={sel?.x ?? null}
         onTap={(x) => {
           let best = 0;
@@ -166,10 +203,9 @@ function RatioChart(p: {
       >
         {(sc) => (
           <>
-            {p.pts.slice(1).map((q, k) => {
-              const a = p.pts[k];
-              return <line key={k} x1={sc.x(a.x)} y1={sc.y(a.y)} x2={sc.x(q.x)} y2={sc.y(q.y)} stroke={p.color} className={`ln ${q.cut ? 'dash' : ''}`} />;
-            })}
+            {monotoneSegments(p.pts.map((q) => ({ x: sc.x(q.x), y: sc.y(q.y) }))).map((d, k) => (
+              <path key={k} d={d} stroke={p.color} className={`ln ${p.pts[k + 1].cut ? 'dash' : ''}`} />
+            ))}
             {p.markers !== false && p.pts.map((q, k) => <circle key={k} cx={sc.x(q.x)} cy={sc.y(q.y)} r={k === i ? 5 : 3.2} fill={p.color} className="dot" />)}
           </>
         )}
@@ -186,7 +222,7 @@ function BellChart({ obs, x0, x1 }: { obs: BellObs[]; x0: number; x1: number }) 
     <div>
       <RatioChart
         pts={pts} color={C_LINE} name="ベル" x0={x0} x1={x1}
-        note="●＝ベル累計を記録した地点（観測点）。破線＝途中にベル未記録の当選がある区間。値が小さいほどベルが多い。"
+        note="●＝ベル累計を記録した地点（観測点）。上ほど良好（1/Xの値が小さい＝ベルが多い）。破線＝途中にベル未記録の当選がある区間（推定なし）。"
         tipFmt={(q) => {
           const o = (q as typeof pts[number]).o;
           return <>{q.label}（{o.x.toLocaleString()}G）：ベル{o.bells}回／自分の実戦{o.games.toLocaleString()}G＝<b>{fmt1(o.ratio)}</b></>;
@@ -342,8 +378,8 @@ export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }
             {sub === 'combined' && (data.comb.length < 2
               ? <Empty>当選が記録されると合算確率の推移を表示します。</Empty>
               : <RatioChart
-                  pts={data.comb} color="#c3c2b7" name="合算" x0={x0} x1={x1} markers={false}
-                  note="合算確率（1/X）。当選のたびに下がり、当選間は上がります（のこぎり型・各時点の正確な値）。値が小さいほど当たりが軽い。"
+                  pts={data.comb.filter((q, k, arr) => k === arr.length - 1 || arr[k + 1].x !== q.x)} color="#c3c2b7" name="合算" x0={x0} x1={x1}
+                  note="●＝各当選時点と現在の合算確率（1/X、正確な値）。上ほど良好。点の間は滑らかにつないだ線で、点の値を超える山や谷は作りません。"
                   tipFmt={(q) => <>{Math.round(q.x).toLocaleString()}G：合算<b>{fmt1(q.y)}</b></>}
                 />)}
             {sub === 'bell' && <BellChart obs={data.bell} x0={x0} x1={x1} />}
