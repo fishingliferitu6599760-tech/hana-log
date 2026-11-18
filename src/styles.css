@@ -315,3 +315,7 @@ h4 small { font-weight: 400; margin-left: 6px; }
 .wcmp th { font-weight: 600; font-size: 12px; }
 .wcmp small { display: block; font-size: 10px; color: var(--sub); font-weight: 400; }
 .bellNow { height: auto; min-height: 52px; padding: 6px 12px; } .bellNow small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* シート内の部品が中身の多いときに縦に押しつぶされないようにする（バックアップ画面の復元欄が見切れる不具合の修正） */
+.sbody > * { flex-shrink: 0; }
+.paste { min-height: 88px; }
