@@ -3,7 +3,7 @@
  * 単位の違う値（回数・確率・ベル）は別系列として返し、1本の曲線に合成しない。
  */
 import { getMachine, type FieldSpec } from './machines';
-import { aggregate, resetFlashBonusIds, timeline, totalGames } from './logic';
+import { aggregate, bellObservations, resetFlashBonusIds, timeline, totalGames, type BellObservation } from './logic';
 import { MISS, NA, type BonusType, type LampColor, type Session } from './types';
 
 export interface Pt { x: number; y: number }
@@ -72,6 +72,7 @@ export interface BellObs {
   /** 直前の観測点との間にベル未記録の当選がある（＝その区間は観測していない） */
   gapBefore: boolean;
   label: string;
+  kind: BellObservation['kind'];
 }
 
 /**
@@ -79,21 +80,13 @@ export interface BellObs {
  * ベル累計は着席時0から数える前提（既存の差分計算と同じ）。0回の記録は 0 として扱い、未記録とは区別する。
  */
 export function bellSeries(s: Session): BellObs[] {
-  const out: BellObs[] = [];
-  let gap = false;
-  for (const r of timeline(s)) {
-    if (r.bonus.bellsAt == null) { gap = true; continue; }
-    const games = r.cumTotal - s.seatTotalGames;
-    out.push({ x: r.cumTotal, games, bells: r.bonus.bellsAt, ratio: ratioOf(games, r.bonus.bellsAt), gapBefore: gap && out.length > 0, label: `#${r.no} ${r.bonus.type}` });
-    gap = false;
-  }
-  const tailCounter = s.endGames ?? s.midGames;
-  if (s.bellPending && s.bellTotal != null && tailCounter != null) {
-    const x = totalGames(s);
-    const games = x - s.seatTotalGames;
-    out.push({ x, games, bells: s.bellTotal, ratio: ratioOf(games, s.bellTotal), gapBefore: gap && out.length > 0, label: s.endGames != null ? 'ヤメ' : '途中保存' });
-  }
-  return out;
+  const rows = timeline(s);
+  return bellObservations(s).map((o, k, arr) => {
+    const prevX = k > 0 ? arr[k - 1].x : s.seatTotalGames;
+    // 直前の観測との間に、ベル未記録の当選があるか（その区間は観測していない）
+    const gap = k > 0 && rows.some((r) => r.cumTotal > prevX && r.cumTotal <= o.x && r.bonus.bellsAt == null);
+    return { x: o.x, games: o.my, bells: o.bells, ratio: ratioOf(o.my, o.bells), gapBefore: gap, label: o.label, kind: o.kind };
+  });
 }
 
 // ---------- C. BIG中スイカ（記録済みBIG1回あたり平均） ----------
@@ -170,6 +163,63 @@ export function recentWindow(s: Session, w: number): WindowCount | null {
   return { from, to, big, reg };
 }
 
+// ---------- 区間比較（直近1,000G／その前の1,000G） ----------
+export interface BellSegment {
+  fromLabel: string; toLabel: string;
+  /** 自分の実戦G上の範囲 (from, to] */
+  fromMy: number; toMy: number;
+  games: number; bells: number; ratio: number | null;
+  /** 区間内にベル未記録の当選がある（区間の合計は実測だが内訳は不明） */
+  gap: boolean;
+}
+
+/** 連続するベル観測の間の区間（実測値のみ。着席時0回から開始） */
+export function bellSegments(s: Session): BellSegment[] {
+  const obs = bellSeries(s);
+  const out: BellSegment[] = [];
+  let prev = { label: '着席時', my: 0, bells: 0 };
+  for (const o of obs) {
+    const games = o.games - prev.my;
+    const bells = o.bells - prev.bells;
+    out.push({ fromLabel: prev.label, toLabel: o.label, fromMy: prev.my, toMy: o.games, games, bells, ratio: bells > 0 ? ratioOf(games, bells) : null, gap: o.gapBefore });
+    prev = { label: o.label, my: o.games, bells: o.bells };
+  }
+  return out;
+}
+
+export interface WindowStat {
+  label: string;
+  /** 自分の実戦G上の範囲 (fromMy, toMy] */
+  fromMy: number; toMy: number;
+  big: number; reg: number;
+  /** この区間に完全に含まれるベル実測区間の合計（推定なし）。含まれる区間が無ければ null */
+  bell: { games: number; bells: number; ratio: number | null } | null;
+}
+
+/**
+ * 直近wGとその前のwG（重ならない区間）。当選は (from, to] に入るものを数え、境界の当選は二重計上しない。
+ * 自分の実戦が 2w G 以上のときだけ返す。
+ */
+export function windowCompare(s: Session, w = 1000): WindowStat[] | null {
+  const a = aggregate(s);
+  if (a.myGames < w * 2) return null;
+  const rows = timeline(s);
+  const segs = bellSegments(s);
+  const make = (label: string, fromMy: number, toMy: number): WindowStat => {
+    let big = 0, reg = 0;
+    for (const r of rows) {
+      const my = r.cumTotal - s.seatTotalGames;
+      if (my > fromMy && my <= toMy) { if (r.bonus.type === 'BIG') big++; else reg++; }
+    }
+    const inside = segs.filter((g) => g.fromMy >= fromMy && g.toMy <= toMy && g.games > 0);
+    const bg = inside.reduce((x, g) => x + g.games, 0);
+    const bb = inside.reduce((x, g) => x + g.bells, 0);
+    return { label, fromMy, toMy, big, reg, bell: inside.length ? { games: bg, bells: bb, ratio: bb > 0 ? ratioOf(bg, bb) : null } : null };
+  };
+  const to = a.myGames;
+  return [make(`その前の${w.toLocaleString()}G`, to - 2 * w, to - w), make(`直近${w.toLocaleString()}G`, to - w, to)];
+}
+
 export const MIN_GAMES = 1000;
 export const MIN_BONUS = 8;
 
@@ -193,11 +243,16 @@ export function supportComments(s: Session): string[] {
       out.push(`直近${w.toLocaleString()}GはREG当選ペースが全体より速めです（直近${rw.reg}回／全体ペースなら約${exp.toFixed(1)}回）。短期の変動を含むため累計値と合わせて確認してください。`);
     }
   }
+  const wc = windowCompare(s);
+  if (wc) {
+    const [p, q] = wc;
+    out.push(`区間比較：その前の1,000G は BIG${p.big}・REG${p.reg}、直近1,000G は BIG${q.big}・REG${q.reg}。1,000G単位は回数のぶれが大きいため、累計値と合わせて確認してください。`);
+  }
   const obs = bellSeries(s).filter((o) => o.ratio != null);
   if (obs.length >= 2) {
     const p = obs[obs.length - 2], q = obs[obs.length - 1];
     const seg = ratioOf(q.games - p.games, q.bells - p.bells);
-    if (seg != null && q.ratio != null) out.push(`直近のベル観測区間（${p.x.toLocaleString()}〜${q.x.toLocaleString()}G）は1/${seg.toFixed(1)}、累計は1/${q.ratio.toFixed(1)}です。`);
+    if (seg != null && q.ratio != null) out.push(`直近のベル実測区間（自分の実戦${p.games.toLocaleString()}〜${q.games.toLocaleString()}G・${q.games - p.games}G・${q.bells - p.bells}回）は1/${seg.toFixed(1)}、累計は1/${q.ratio.toFixed(2)}です。`);
   }
   if (out.length === 0) out.push('記録上、BIG・REGの偏りや直近の大きな変化は見られません。他の判別要素と合わせて確認してください。');
   return out;

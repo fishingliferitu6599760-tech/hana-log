@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import {
   addBonus, aggregate, canAskGakkun, deleteBonus, emptyPrefs, endSession, exportBackup, isComplete, isResetFlashTarget,
-  bellTail, bellTarget, setBonusBells, newSession, normalizeSession, parseBackup, setBellTotal, setBonusType, setMid, shareDetail, shareSimple, timeline,
+  bellTail, bellTarget, setBonusBells, newSession, normalizeSession, parseBackup, setBonusType, setMid, shareDetail, shareSimple, timeline,
   totalBells, totalGames, updateBonus,
 } from '../src/logic';
 import { getMachine, MACHINES } from '../src/machines';
@@ -92,15 +92,11 @@ describe('3-4. スイカ・ランプ集計', () => {
 });
 
 describe('5. ベル（累計入力→当選時に記録）', () => {
-  it('ベル累計を入れてから当選→その当選に累計を記録、履歴は差分と確率', () => {
-    let s = setBellTotal(s0(), 20);
-    s = setBellTotal(s, 25); // 置き換え（加算しない）
-    expect(totalBells(s)).toBe(25);
-    s = addBonus(s, 'BIG', 180);
+  it('当選と同時にベル累計を記録、履歴は差分と確率', () => {
+    let s = addBonus(s0(), 'BIG', 180, undefined, 25);
     expect(s.bonuses[0].bellsAt).toBe(25);
-    expect(s.bellPending).toBe(false);
-    s = setBellTotal(s, 35);
-    s = addBonus(s, 'REG', 70);
+    expect(totalBells(s)).toBe(25);
+    s = addBonus(s, 'REG', 70, undefined, 35);
     const rows = timeline(s);
     expect([rows[0].bellDiff, rows[1].bellDiff]).toEqual([25, 10]);
     expect(rows[0].bellRatio).toBeCloseTo(7.2);
@@ -109,11 +105,9 @@ describe('5. ベル（累計入力→当選時に記録）', () => {
     expect(aggregate(s).bellRatio).toBeCloseTo(250 / 35);
   });
   it('ベル累計を入れ忘れた当選は未記録、次の入力時に2区間ぶんの差分として表示', () => {
-    let s = setBellTotal(s0(), 30);
-    s = addBonus(s, 'BIG', 210);
+    let s = addBonus(s0(), 'BIG', 210, undefined, 30);
     s = addBonus(s, 'REG', 100); // 入れ忘れ
-    s = setBellTotal(s, 90);
-    s = addBonus(s, 'BIG', 320);
+    s = addBonus(s, 'BIG', 320, undefined, 90);
     const r = timeline(s);
     expect(r[1].bellDiff).toBeNull();
     expect([r[2].bellDiff, r[2].bellGames, r[2].bellSpan]).toEqual([60, 420, 2]);
@@ -122,27 +116,27 @@ describe('5. ベル（累計入力→当選時に記録）', () => {
   it('当選後にベル累計を修正すると差分・確率も更新', () => {
     let s = addBonus(s0(), 'BIG', 210); // ベル未入力で登録
     expect(timeline(s)[0].bellDiff).toBeNull();
+    expect(totalBells(s)).toBeNull(); // 未記録
     s = updateBonus(s, s.bonuses[0].id, { bellsAt: 35 });
     expect(timeline(s)[0].bellDiff).toBe(35);
     expect(totalBells(s)).toBe(35);
     expect(aggregate(s).bellRatio).toBeCloseTo(6);
   });
-  it('順番自由：当選後にベル累計を入れるとその当選に記録', () => {
+  it('順番自由：当選後にベル累計を入れるとその当選に記録（後入力として区別）', () => {
     let s = addBonus(s0(), 'BIG', 160);
     expect(bellTarget(s)?.id).toBe(s.bonuses[0].id);
     s = setBonusBells(s, s.bonuses[0].id, 23);
-    expect(s.bonuses[0].bellsAt).toBe(23);
-    expect([s.bellTotal, s.bellPending]).toEqual([23, false]);
+    expect([s.bonuses[0].bellsAt, s.bonuses[0].bellsSrc]).toEqual([23, 'late']);
     expect(bellTarget(s)).toBeNull();
-    s = addBonus(setBellTotal(s, 32), 'REG', 70); // 先に入れた場合は従来どおり
+    s = addBonus(s, 'REG', 70, undefined, 32);
     expect(bellTarget(s)).toBeNull();
     expect(timeline(s)[1].bellDiff).toBe(9);
     s = setMid(addBonus(s, 'REG', 40), 100); // 途中保存したら対象外
     expect(bellTarget(s)).toBeNull();
   });
   it('ヤメ時のベル累計は最終区間として扱う', () => {
-    let s = addBonus(setBellTotal(s0(), 30), 'BIG', 210);
-    s = endSession(setBellTotal(s, 50), 140);
+    let s = addBonus(s0(), 'BIG', 210, undefined, 30);
+    s = endSession(s, 140, undefined, 50);
     const t = bellTail(s);
     expect([t.diff, t.games]).toEqual([20, 140]);
     expect(aggregate(s).bellRatio).toBeCloseTo(350 / 50);
@@ -235,7 +229,7 @@ describe('13. サンプル実戦（10/25）の最終値', () => {
     expect(shareSimple(s)).toBe(
       [
         '日付：2026/10/25', '店舗：タイホウ篭山', '台番：1625', '機種：ニューキングV-30', '',
-        '累計6049G｜B16/R15｜🔔876(1/6.9)｜🍉B10/R3', '',
+        '累計6049G｜B16/R15｜🔔876(1/6.91)｜🍉B10/R3', '',
         'BIG後半：🟦6🟡4🟢3🟥3🌈0', 'BIG終了：🤍15🟦1', 'REG終了：🤍14🟦1',
         'レトロ：BIG権利1/発生1・REG権利0/発生0（権利は自動判定・暫定）',
       ].join('\n'),
@@ -243,7 +237,7 @@ describe('13. サンプル実戦（10/25）の最終値', () => {
   });
   it('10. 詳細共有に全31件・区間ベル・最終ハマリ', () => {
     const t = shareDetail(s);
-    const rows = t.split('\n').filter((l) => /^\d+\|/.test(l));
+    const rows = t.split('■ベル観測記録')[0].split('\n').filter((l) => /^\d+\|/.test(l));
     expect(rows.length).toBe(31);
     expect(rows[0]).toMatch(/^1\|\d\d:\d\d\|REG\|14\|14\|2\|2\|1\/7\.0\|0\|-\|🤍/);
     expect(rows[30]).toMatch(/\|BIG\|407\|5765\|/);
@@ -270,13 +264,18 @@ describe('9・11. 保存・バックアップ・旧データ移行', () => {
   it('旧形式（累計ベル・ゴールド）を読み込める', () => {
     const old = normalizeSession({ machineId: 'newgold-30', bells: 307, bonuses: [{ type: 'REG', games: 10, retroRight: 'not_applicable' }] });
     expect(old.machineId).toBe('new-king-v30');
-    expect(totalBells(old)).toBe(307);
+    // v1 の累計ベルは時点不明 → 要確認として保持（確率には使わない）
+    expect(old.legacyBell?.bells).toBe(307);
+    expect(totalBells(old)).toBeNull();
     expect(old.bonuses[0].bellsAt).toBeNull();
   });
   it('前回版（区間ベル）を累計に変換して読み込める', () => {
     const v2 = normalizeSession({ bellsBase: 0, curBells: 9, bonuses: [{ type: 'BIG', games: 160, bells: 23 }, { type: 'REG', games: 70, bells: 9 }] });
     expect(v2.bonuses.map((b) => b.bellsAt)).toEqual([23, 32]);
-    expect([v2.bellTotal, v2.bellPending]).toEqual([41, true]);
+    // 現在区間のベル（curBells）は時点が残っていないため要確認（確率計算に使わない）
+    expect(v2.bellObs).toEqual([]);
+    expect(v2.legacyBell?.bells).toBe(41);
+    expect(v2.legacy).toMatchObject({ bellsBase: 0, curBells: 9 });
     expect((v2.bonuses[0] as any)._oldBells).toBeUndefined();
   });
   it('IndexedDB に保存→再読込で一致', async () => {

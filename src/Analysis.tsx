@@ -5,8 +5,8 @@
  */
 import { Component, useMemo, useState, type ReactNode } from 'react';
 import {
-  bellSeries, bonusSeries, combinedSeries, countsAt, lampStat, ratioOf, suikaSeries, supportComments, SUPPORT_NOTE,
-  type BellObs, type BonusSeries, type LampStat, type Pt, type SuikaPt,
+  bellSegments, bellSeries, bonusSeries, combinedSeries, countsAt, lampStat, ratioOf, suikaSeries, supportComments, SUPPORT_NOTE, windowCompare,
+  type BellObs, type BellSegment, type WindowStat, type BonusSeries, type LampStat, type Pt, type SuikaPt,
 } from './analysis';
 import { aggregate } from './logic';
 import { getMachine, LAMP_CSS, LAMP_LABEL } from './machines';
@@ -215,7 +215,9 @@ function RatioChart(p: {
   );
 }
 
-function BellChart({ obs, x0, x1 }: { obs: BellObs[]; x0: number; x1: number }) {
+const fmt2 = (v: number | null) => (v == null ? '—' : `1/${v.toFixed(2)}`);
+
+function BellChart({ obs, segs, x0, x1 }: { obs: BellObs[]; segs: BellSegment[]; x0: number; x1: number }) {
   const pts = obs.filter((o) => o.ratio != null).map((o) => ({ x: o.x, y: o.ratio as number, cut: o.gapBefore, label: o.label, o }));
   if (pts.length === 0) return <Empty>ベル累計の記録がまだありません。ベル欄に入力して当選を登録すると、その地点が観測点になります。</Empty>;
   return (
@@ -225,14 +227,19 @@ function BellChart({ obs, x0, x1 }: { obs: BellObs[]; x0: number; x1: number }) 
         note="●＝ベル累計を記録した地点（観測点）。上ほど良好（1/Xの値が小さい＝ベルが多い）。破線＝途中にベル未記録の当選がある区間（推定なし）。"
         tipFmt={(q) => {
           const o = (q as typeof pts[number]).o;
-          return <>{q.label}（{o.x.toLocaleString()}G）：ベル{o.bells}回／自分の実戦{o.games.toLocaleString()}G＝<b>{fmt1(o.ratio)}</b></>;
+          return <>{q.label}（{o.x.toLocaleString()}G）：ベル{o.bells}回／自分の実戦{o.games.toLocaleString()}G＝<b>{fmt2(o.ratio)}</b></>;
         }}
       />
       <details className="ctable">
         <summary>数値を表で見る</summary>
         <table>
-          <thead><tr><th>地点</th><th>累計G</th><th>実戦G</th><th>ベル累計</th><th>確率</th></tr></thead>
-          <tbody>{obs.map((o, k) => <tr key={k}><td>{o.label}{o.gapBefore ? '※' : ''}</td><td>{o.x}</td><td>{o.games}</td><td>{o.bells}</td><td>{fmt1(o.ratio)}</td></tr>)}</tbody>
+          <thead><tr><th>地点</th><th>実戦G</th><th>ベル累計</th><th>累計確率</th><th>区間G</th><th>区間回</th><th>区間確率</th></tr></thead>
+          <tbody>{obs.map((o, k) => (
+            <tr key={k}>
+              <td>{o.label}{o.gapBefore ? '※' : ''}</td><td>{o.games}</td><td>{o.bells}</td><td>{fmt2(o.ratio)}</td>
+              <td>{segs[k]?.games ?? '-'}</td><td>{segs[k]?.bells ?? '-'}</td><td>{fmt1(segs[k]?.ratio ?? null)}</td>
+            </tr>
+          ))}</tbody>
         </table>
         <p className="hint">※＝直前の観測点との間にベル未記録の当選あり（その区間の途中値は推定していません）</p>
       </details>
@@ -319,6 +326,28 @@ function LampPanel({ st, x0, x1 }: { st: LampStat; x0: number; x1: number }) {
   );
 }
 
+/** 直近1,000Gとその前の1,000G（区間は重ならない）。ベルは区間内に完全に入る実測区間だけを合計 */
+function WindowTable({ wc, myGames }: { wc: WindowStat[] | null; myGames: number }) {
+  if (!wc) return <div className="cempty small">区間比較（直近1,000G／その前の1,000G）は、自分の実戦が2,000G以上で表示します（現在{myGames.toLocaleString()}G）。</div>;
+  return (
+    <section className="wcmp">
+      <h5>区間比較（自分の実戦G・区間は重ならない）</h5>
+      <table>
+        <thead><tr><th></th>{wc.map((w) => <th key={w.label}>{w.label}<small>{w.fromMy.toLocaleString()}〜{w.toMy.toLocaleString()}G</small></th>)}</tr></thead>
+        <tbody>
+          <tr><td>BIG</td>{wc.map((w) => <td key={w.label}>{w.big}回</td>)}</tr>
+          <tr><td>REG</td>{wc.map((w) => <td key={w.label}>{w.reg}回</td>)}</tr>
+          <tr><td>合算</td>{wc.map((w) => <td key={w.label}>{w.big + w.reg}回</td>)}</tr>
+          <tr><td>ベル<small>実測分</small></td>{wc.map((w) => (
+            <td key={w.label}>{w.bell ? <>{fmt1(w.bell.ratio)}<small>{w.bell.games}G・{w.bell.bells}回</small></> : <small>区間内に実測なし</small>}</td>
+          ))}</tr>
+        </tbody>
+      </table>
+      <p className="note">ベルは、区間内に両端が入るベル実測区間だけを合計しています（区間の境界に観測値がない部分は推定で埋めていません）。</p>
+    </section>
+  );
+}
+
 // ---------- 画面 ----------
 export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }) {
   const [tab, setTab] = useState<'main' | 'detail'>('main');
@@ -326,7 +355,7 @@ export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }
   const data = useMemo(() => {
     const bs = bonusSeries(s);
     return {
-      a: aggregate(s), bs, comb: combinedSeries(bs), bell: bellSeries(s), suika: suikaSeries(s),
+      a: aggregate(s), bs, comb: combinedSeries(bs), bell: bellSeries(s), suika: suikaSeries(s), segs: bellSegments(s), wc: windowCompare(s),
       lamps: (['regSide', 'bigEnd', 'regEnd'] as const).map((k) => lampStat(s, k)), comments: supportComments(s),
     };
   }, [s]);
@@ -358,7 +387,7 @@ export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }
               <div><small><span className="sw" style={{ background: C_BIG }} />BIG {a.big}回</small><b>{fmt1(big)}</b></div>
               <div><small><span className="sw" style={{ background: C_REG }} />REG {a.reg}回</small><b>{fmt1(reg)}</b></div>
               <div><small>合算 {a.big + a.reg}回</small><b>{fmt1(comb)}</b></div>
-              <div className="wide"><small><span className="sw" style={{ background: C_LINE }} />ベル {a.bells}回</small><b>{fmt1(a.bellRatio)}</b></div>
+              <div className="wide"><small><span className="sw" style={{ background: C_LINE }} />ベル累計 {a.bell.count}{a.bell.scope ? `（${a.bell.scope}）` : ''}</small><b>{a.bell.ratio}</b></div>
             </div>
             <div className="subTabs">
               <button className={sub === 'bonus' ? 'on' : ''} onClick={() => setSub('bonus')}>BIG・REG推移</button>
@@ -382,7 +411,8 @@ export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }
                   note="●＝各当選時点と現在の合算確率（1/X、正確な値）。上ほど良好。点の間は滑らかにつないだ線で、点の値を超える山や谷は作りません。"
                   tipFmt={(q) => <>{Math.round(q.x).toLocaleString()}G：合算<b>{fmt1(q.y)}</b></>}
                 />)}
-            {sub === 'bell' && <BellChart obs={data.bell} x0={x0} x1={x1} />}
+            {sub === 'bell' && <BellChart obs={data.bell} segs={data.segs} x0={x0} x1={x1} />}
+            <WindowTable wc={data.wc} myGames={a.myGames} />
             <div className="support">
               <h5>判断サポート</h5>
               {data.comments.map((c, k) => <p key={k}>{c}</p>)}

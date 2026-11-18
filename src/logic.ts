@@ -1,7 +1,7 @@
 import { getMachine, LAMP_EMOJI, MISS_EMOJI, type BonusSpec, type FieldSpec, type MachineDef } from './machines';
 import { BGM_LABEL, computeRetro, effectiveRight, isZeroStart, manualMismatch, actualFromBgm, type RetroAuto } from './retro';
 import {
-  MISS, NA, type AppState, type Bgm, type ResetFlash, type Bonus, type BonusType, type LampColor, type LampValue, type Prefs, type Session,
+  MISS, NA, type AppState, type BellPoint, type Bgm, type ResetFlash, type Bonus, type BonusType, type LampColor, type LampValue, type Prefs, type Session,
   type SuikaValue, type YesNo,
 } from './types';
 
@@ -29,7 +29,7 @@ export function newSession(p: Partial<Session> = {}): Session {
     id: uid(), date: todayStr(), store: '', machineId: 'new-king-v30', tableNo: '', lendRate: null,
     seatTotalGames: 0, seatCurrentGames: 0, seatBig: 0, seatReg: 0, gakkun: null, resetFlash: null,
     cashInvest: null, medalsUsed: null, payout: null, finalBalance: null,
-    bellTotal: null, bellPending: false, bonuses: [], midGames: null, midAt: null, endGames: null, endedAt: null, memo: '',
+    bellObs: [], legacyBell: null, bonuses: [], midGames: null, midAt: null, endGames: null, endedAt: null, memo: '',
     createdAt: now, updatedAt: now, ...p,
   };
 }
@@ -87,50 +87,103 @@ export function addedGames(s: Session, index: number): number {
 }
 
 export const ratio = (games: number, n: number | null): number | null => (n && n > 0 && games > 0 ? games / n : null);
+/** 区間などの確率（小数第1位） */
 export const probText = (r: number | null): string => (r == null ? '―' : `1/${r.toFixed(1)}`);
-export const diffText = (r: { bellDiff: number | null; bellSpan: number }): string =>
-  r.bellDiff == null ? '-' : `${r.bellDiff}${r.bellSpan > 1 ? `(${r.bellSpan}区間)` : ''}`;
+/** 累計ベル確率（小数第2位。丸めは表示時のみ） */
+export const probText2 = (r: number | null): string => (r == null ? '—' : `1/${r.toFixed(2)}`);
+export const diffText = (r: { bellDiff: number | null; bellSpan: number; bellFrom?: BellObservation['kind'] | 'seat' | null }): string =>
+  r.bellDiff == null ? '-' : `${r.bellDiff}${r.bellSpan > 1 ? `(${r.bellSpan}区間)` : ''}${r.bellFrom === 'mid' || r.bellFrom === 'end' ? '(途中保存から)' : ''}`;
 
 export interface TimelineRow {
   bonus: Bonus; no: number; cumTotal: number; played: number; warn: boolean;
-  /** 前回ベル累計からの差分（ボーナス間ベル）。ベル累計未入力なら null */
+  /** 直前のベル観測からの差分（ボーナス間ベル）。この当選のベルが未記録なら null */
   bellDiff: number | null;
-  /** 差分を数えた区間のG（前回ベル累計入力時点から） */
+  /** 差分を数えた区間のG（直前のベル観測時点から） */
   bellGames: number | null;
-  /** 差分が何回分の当選区間にまたがるか（途中でベル累計未入力の当選があると2以上） */
+  /** 差分が何回分の当選区間にまたがるか（途中にベル未記録の当選があると2以上） */
   bellSpan: number;
   bellRatio: number | null;
+  /** 直前の観測の種類（seat＝着席時0回から） */
+  bellFrom: BellObservation['kind'] | 'seat' | null;
 }
 
-/** 古い順の当選履歴と、各当選時点の累計G・ボーナス間ベル（ベル累計の差分）と確率 */
-export function timeline(s: Session): TimelineRow[] {
+/** 当選ごとの累計G（ベル計算と共通の土台） */
+function rawRows(s: Session): Array<{ b: Bonus; i: number; cum: number; add: number }> {
   let cum = s.seatTotalGames;
-  let lastBells = 0; // 着席時に外部カウンターを0から数える前提
-  let gamesSince = 0;
-  let span = 0;
   return s.bonuses.map((b, i) => {
     const add = addedGames(s, i);
     cum += add;
-    gamesSince += add;
-    span++;
-    const row: TimelineRow = { bonus: b, no: i + 1, cumTotal: cum, played: add, warn: add < 0, bellDiff: null, bellGames: null, bellSpan: 0, bellRatio: null };
-    if (b.bellsAt != null) {
-      row.bellDiff = b.bellsAt - lastBells;
-      row.bellGames = gamesSince;
-      row.bellSpan = span;
-      row.bellRatio = row.bellDiff > 0 ? ratio(gamesSince, row.bellDiff) : null;
-      lastBells = b.bellsAt;
-      gamesSince = 0;
-      span = 0;
-    }
-    return row;
+    return { b, i, cum, add };
   });
 }
 
-/** 最後にベル累計が記録された当選の値（無ければ0） */
-function lastKnownBells(s: Session): number {
-  for (let i = s.bonuses.length - 1; i >= 0; i--) if (s.bonuses[i].bellsAt != null) return s.bonuses[i].bellsAt as number;
-  return 0;
+/** ベル観測（当選時・後入力・途中保存・終了時）。必ずG時点とセット */
+export interface BellObservation {
+  /** 台の累計G位置 */
+  x: number;
+  /** 自分の実戦G（着席から） */
+  my: number;
+  bells: number;
+  kind: 'bonus' | 'late' | 'mid' | 'end';
+  label: string;
+  at: string;
+  bonusId?: string;
+  no?: number;
+  pointId?: string;
+  migrated?: boolean;
+}
+
+const KIND_LABEL: Record<BellObservation['kind'], string> = { bonus: '当選時', late: '当選時（後入力）', mid: '途中保存', end: '終了時' };
+export const bellKindText = (o: BellObservation): string => `${KIND_LABEL[o.kind]}${o.migrated ? '（旧データ移行）' : ''}`;
+
+/** 当選間のベル観測の位置（台の累計G）。起点の当選が見つからなければ null */
+function pointX(s: Session, p: BellPoint, pos: Map<string, number>): number | null {
+  const base = p.after == null ? s.seatTotalGames - s.seatCurrentGames : pos.get(p.after);
+  return base == null ? null : base + p.counter;
+}
+
+/** すべてのベル観測をG位置順に並べる（同じ位置なら記録時刻順） */
+export function bellObservations(s: Session): BellObservation[] {
+  const rows = rawRows(s);
+  const pos = new Map(rows.map((r) => [r.b.id, r.cum]));
+  const out: BellObservation[] = [];
+  rows.forEach((r) => {
+    if (r.b.bellsAt == null) return;
+    out.push({
+      x: r.cum, my: r.cum - s.seatTotalGames, bells: r.b.bellsAt, kind: r.b.bellsSrc === 'late' ? 'late' : 'bonus',
+      label: `#${r.i + 1} ${r.b.type}`, at: r.b.at, bonusId: r.b.id, no: r.i + 1,
+    });
+  });
+  (s.bellObs ?? []).forEach((p) => {
+    const x = pointX(s, p, pos);
+    if (x == null) return;
+    out.push({ x, my: x - s.seatTotalGames, bells: p.bells, kind: p.src, label: p.src === 'end' ? 'ヤメ' : '途中保存', at: p.at, pointId: p.id, migrated: p.migrated });
+  });
+  const order = new Map(out.map((o, k) => [o, k]));
+  return out.sort((a, b) => a.x - b.x || (a.kind === 'bonus' || a.kind === 'late' ? -1 : 0) - (b.kind === 'bonus' || b.kind === 'late' ? -1 : 0) || (order.get(a)! - order.get(b)!));
+}
+
+/** 古い順の当選履歴と、各当選時点の累計G・ボーナス間ベル（直前のベル観測との差分）と確率 */
+export function timeline(s: Session): TimelineRow[] {
+  const rows = rawRows(s);
+  const obs = bellObservations(s);
+  return rows.map((r) => {
+    const row: TimelineRow = {
+      bonus: r.b, no: r.i + 1, cumTotal: r.cum, played: r.add, warn: r.add < 0,
+      bellDiff: null, bellGames: null, bellSpan: 0, bellRatio: null, bellFrom: null,
+    };
+    if (r.b.bellsAt == null) return row;
+    const k = obs.findIndex((o) => o.bonusId === r.b.id);
+    const prev = k > 0 ? obs[k - 1] : null;
+    const prevX = prev ? prev.x : s.seatTotalGames;
+    const prevMy = prev ? prev.my : 0;
+    row.bellDiff = r.b.bellsAt - (prev ? prev.bells : 0);
+    row.bellGames = r.cum - s.seatTotalGames - prevMy;
+    row.bellSpan = rows.filter((q) => q.cum > prevX && q.cum <= r.cum).length;
+    row.bellRatio = row.bellDiff > 0 ? ratio(row.bellGames, row.bellDiff) : null;
+    row.bellFrom = prev ? prev.kind : 'seat';
+    return row;
+  });
 }
 
 const tailAdd = (s: Session, counter: number) => (s.bonuses.length === 0 ? counter - s.seatCurrentGames : counter);
@@ -150,42 +203,92 @@ export function tailPlayed(s: Session): number | null {
 
 /** 累計G。途中保存・ヤメは「最終ボーナス後の表示値」として1回だけ加算（二重加算しない） */
 export function totalGames(s: Session): number {
-  const rows = timeline(s);
-  const base = rows.length ? rows[rows.length - 1].cumTotal : s.seatTotalGames;
+  const rows = rawRows(s);
+  const base = rows.length ? rows[rows.length - 1].cum : s.seatTotalGames;
   return base + (tailPlayed(s) ?? 0);
 }
 
-/** 現在のベル累計 */
-export function totalBells(s: Session): number {
-  if (s.bellPending && s.bellTotal != null) return s.bellTotal;
-  const known = s.bonuses.some((b) => b.bellsAt != null);
-  return known ? lastKnownBells(s) : s.bellTotal ?? 0;
+/** 最後のベル観測（無ければ null＝未記録） */
+export function lastBellObservation(s: Session): BellObservation | null {
+  const o = bellObservations(s);
+  return o.length ? o[o.length - 1] : null;
 }
 
-/** 最終当選以降（未記録の当選を含む）のベル差分と、その区間のG・確率 */
-export function bellTail(s: Session): { diff: number | null; games: number | null; ratio: number | null } {
-  if (!s.bellPending || s.bellTotal == null) return { diff: null, games: null, ratio: null };
-  const diff = s.bellTotal - lastKnownBells(s);
-  let g = 0;
-  for (let i = s.bonuses.length - 1; i >= 0 && s.bonuses[i].bellsAt == null; i--) g += addedGames(s, i);
-  const tp = tailPlayed(s);
-  if (tp == null) return { diff, games: null, ratio: null };
-  g += tp;
-  return { diff, games: g, ratio: diff > 0 ? ratio(g, diff) : null };
+/** 現在わかっているベル累計（null＝未記録、0＝観測済みの0回） */
+export function totalBells(s: Session): number | null {
+  return lastBellObservation(s)?.bells ?? null;
 }
 
-/** 全体のベル確率：ベル累計が分かっている最後の時点までのGで計算 */
+/** 累計ベル確率：最後にベルを実測した時点までの自分の実戦Gで計算（0回・未記録は null） */
 export function bellRatioTotal(s: Session): number | null {
-  let g = 0;
-  let known: { g: number; n: number } | null = null;
-  timeline(s).forEach((r) => {
-    g += r.played;
-    if (r.bonus.bellsAt != null) known = { g, n: r.bonus.bellsAt };
+  const o = lastBellObservation(s);
+  return o ? ratio(o.my, o.bells) : null;
+}
+
+/** 最終当選より後のベル観測（途中保存・終了時）の最新値と、直前観測からの差分 */
+export function bellTail(s: Session): { obs: BellObservation | null; diff: number | null; games: number | null; ratio: number | null } {
+  const obs = bellObservations(s);
+  const last = obs[obs.length - 1];
+  if (!last || (last.kind !== 'mid' && last.kind !== 'end')) return { obs: null, diff: null, games: null, ratio: null };
+  const rows = rawRows(s);
+  const lastBonusX = rows.length ? rows[rows.length - 1].cum : -Infinity;
+  if (last.x < lastBonusX) return { obs: null, diff: null, games: null, ratio: null };
+  const prev = obs.length > 1 ? obs[obs.length - 2] : null;
+  const diff = last.bells - (prev?.bells ?? 0);
+  const games = last.my - (prev?.my ?? 0);
+  return { obs: last, diff, games, ratio: diff > 0 ? ratio(games, diff) : null };
+}
+
+/**
+ * ベル累計の表示用まとめ。
+ * count：「未記録」または回数、ratio：1/X.XX または —、scope：最終実測が現在より前なら「◯G・◯回まで」
+ */
+export function bellSummary(s: Session): { count: string; ratio: string; scope: string | null; obs: BellObservation | null } {
+  const o = lastBellObservation(s);
+  if (!o) return { count: '未記録', ratio: '—', scope: null, obs: null };
+  const r = ratio(o.my, o.bells);
+  const behind = o.x < totalGames(s);
+  return {
+    count: `${o.bells}回`,
+    ratio: probText2(r),
+    scope: behind ? `${o.my.toLocaleString('ja-JP')}G・${o.bells}回まで` : null,
+    obs: o,
+  };
+}
+
+/** 要確認の一覧（値は変更せず表示だけ） */
+export function sessionIssues(s: Session): string[] {
+  const out: string[] = [];
+  const rows = rawRows(s);
+  rows.forEach((r) => {
+    if (r.add < 0) out.push(`#${r.i + 1} 当選G ${r.b.games}G が着席時の表示G ${s.seatCurrentGames}G より小さい（負のG数）`);
   });
-  const tp = tailPlayed(s);
-  if (s.bellPending && s.bellTotal != null && tp != null) known = { g: g + tp, n: s.bellTotal };
-  const k = known as { g: number; n: number } | null;
-  return k ? ratio(k.g, k.n) : null;
+  const ids = new Set(s.bonuses.map((b) => b.id));
+  (s.bellObs ?? []).forEach((p) => {
+    if (p.after != null && !ids.has(p.after)) out.push(`ベル観測（${p.bells}回）の起点の当選が見つからない`);
+    if (p.after == null && p.counter < s.seatCurrentGames) out.push(`ベル観測（${p.bells}回）の位置 ${p.counter}G が着席時の表示G ${s.seatCurrentGames}G より小さい`);
+  });
+  const obs = bellObservations(s);
+  obs.forEach((o, k) => {
+    const prev = k > 0 ? obs[k - 1] : null;
+    const pb = prev?.bells ?? 0;
+    const pm = prev?.my ?? 0;
+    const where = (x: BellObservation) => `${x.label}（自分${x.my.toLocaleString('ja-JP')}G時点）${x.bells}回`;
+    if (o.bells < pb && prev) out.push(`ベル累計が前の記録より少ない：${where(prev)} → ${where(o)}`);
+    else if (o.bells === pb && o.my - pm >= 20) out.push(`ベル累計が増えていない：${prev ? where(prev) : '着席時0回'} → ${where(o)}（${o.my - pm}Gで+0回）`);
+  });
+  if (s.legacyBell) out.push(`時点不明の旧ベル値 ${s.legacyBell.bells}回（${s.legacyBell.reason}）。確率計算には使っていません`);
+  return out;
+}
+
+/** ベル入力の妥当性（保存前チェック）。x位置に bells を置いたとき前後の観測と矛盾しないか */
+export function checkBellAt(s: Session, x: number, bells: number, ignore: { pointId?: string; bonusId?: string } = {}): string | null {
+  const obs = bellObservations(s).filter((o) => !(ignore.pointId && o.pointId === ignore.pointId) && !(ignore.bonusId && o.bonusId === ignore.bonusId));
+  const before = [...obs].reverse().find((o) => o.x <= x);
+  const after = obs.find((o) => o.x > x);
+  if (before && bells < before.bells) return `前の記録（${before.label}・自分${before.my.toLocaleString('ja-JP')}G時点）の${before.bells}回より少なくなっています`;
+  if (after && bells > after.bells) return `後の記録（${after.label}・自分${after.my.toLocaleString('ja-JP')}G時点）の${after.bells}回より多くなっています`;
+  return null;
 }
 
 // ---------- 集計 ----------
@@ -268,7 +371,7 @@ export function aggregate(s: Session) {
     total, myGames: total - s.seatTotalGames,
     myBig: bigs.length, myReg: regs.length,
     big: s.seatBig + bigs.length, reg: s.seatReg + regs.length,
-    bells: totalBells(s), bellRatio: bellRatioTotal(s),
+    bells: totalBells(s), bellRatio: bellRatioTotal(s), bell: bellSummary(s),
     bigSuika: countSuika(bigs), regSuika: countSuika(regs),
     bigSide: countLamp(bigs, 'side'), regSide: countLamp(regs, 'side'),
     bigEnd: countLamp(bigs, 'end', rfIds), regEnd: countLamp(regs, 'end'),
@@ -321,17 +424,13 @@ const touch = (s: Session): Session => ({ ...s, updatedAt: new Date().toISOStrin
 
 /**
  * ボーナス登録（一括・原子的）。G数・種別・ベル累計を1件の当選として同時に保存する。
- * bells を渡せばその値、無ければ事前に入力済み（bellPending）の累計、どちらも無ければ未記録(null)。
- * 前回の累計を新しい当選へ勝手にコピーしない。途中保存・ヤメは解除。
+ * bells を渡せばその当選時点のベル累計として記録、無ければ未記録(null)。
+ * 途中保存などの過去のベル値を新しい当選へコピーしない。途中保存・ヤメは解除（観測記録は残る）。
  */
 export function addBonus(s: Session, type: BonusType, games: number, at?: string, bells?: number | null): Session {
-  const bellsAt = bells != null ? Math.max(0, Math.floor(bells)) : s.bellPending ? s.bellTotal : null;
-  const b = newBonus(getMachine(s.machineId), type, games, bellsAt, at);
-  return touch({
-    ...s, bonuses: [...s.bonuses, b],
-    bellTotal: bells != null ? bellsAt : s.bellTotal, bellPending: false,
-    midGames: null, midAt: null, endGames: null, endedAt: null,
-  });
+  const bellsAt = bells != null ? Math.max(0, Math.floor(bells)) : null;
+  const b = { ...newBonus(getMachine(s.machineId), type, games, bellsAt, at), ...(bellsAt != null ? { bellsSrc: 'bonus' as const } : {}) };
+  return touch({ ...s, bonuses: [...s.bonuses, b], midGames: null, midAt: null, endGames: null, endedAt: null });
 }
 /** BGMを記録（レトロ実発生も連動して設定。権利の記録は変更しない） */
 export function setBgm(s: Session, id: string, bgm: Bgm): Session {
@@ -344,37 +443,73 @@ export function setBonusType(s: Session, id: string, type: BonusType): Session {
   const m = getMachine(s.machineId);
   return touch({ ...s, bonuses: s.bonuses.map((b) => (b.id === id ? changeType(b, type, m) : b)) });
 }
+/**
+ * 当選を削除。その当選を起点にしていたベル観測は、直前の当選（なければ着席時）を起点に付け替え、
+ * 台の累計G上の位置が変わらないよう当選間Gを足し込む。
+ */
 export function deleteBonus(s: Session, id: string): Session {
-  return touch({ ...s, bonuses: s.bonuses.filter((b) => b.id !== id) });
+  const i = s.bonuses.findIndex((b) => b.id === id);
+  if (i < 0) return s;
+  const del = s.bonuses[i];
+  const prevId = i > 0 ? s.bonuses[i - 1].id : null;
+  const bellObs = (s.bellObs ?? []).map((p) => (p.after === id ? { ...p, after: prevId, counter: p.counter + del.games } : p));
+  return touch({ ...s, bonuses: s.bonuses.filter((b) => b.id !== id), bellObs });
 }
-/** 当選後にその当選のベル累計を入力（順番自由入力）。最新の当選なら現在のベル累計も更新 */
+/** 当選後にその当選のベル累計を後入力（当選時点の値として記録） */
 export function setBonusBells(s: Session, id: string, n: number): Session {
-  const v = Math.max(0, Math.floor(n));
-  const isLast = s.bonuses[s.bonuses.length - 1]?.id === id;
-  const next = updateBonus(s, id, { bellsAt: v });
-  return isLast ? { ...next, bellTotal: v, bellPending: false } : next;
+  return updateBonus(s, id, { bellsAt: Math.max(0, Math.floor(n)), bellsSrc: 'late' });
 }
 
-/** ベル累計を後から入れる対象の当選（最新の当選がベル未入力で、その後ベル入力・途中保存・ヤメがない） */
+/** ベル累計を後から入れる対象の当選（最新の当選がベル未記録で、その後に途中保存・ヤメ・ベル観測がない） */
 export function bellTarget(s: Session): Bonus | null {
   const last = s.bonuses[s.bonuses.length - 1];
-  if (!last || last.bellsAt != null || s.bellPending || s.midGames != null || s.endGames != null) return null;
+  if (!last || last.bellsAt != null || s.midGames != null || s.endGames != null) return null;
+  if ((s.bellObs ?? []).some((p) => p.after === last.id)) return null;
   return last;
 }
 
-export function setMid(s: Session, games: number | null, at = new Date().toISOString()): Session {
-  return touch({ ...s, midGames: games, midAt: games == null ? null : at });
+const lastBonusId = (s: Session): string | null => s.bonuses[s.bonuses.length - 1]?.id ?? null;
+const point = (s: Session, counter: number, bells: number, src: BellPoint['src'], at: string): BellPoint =>
+  ({ id: uid(), after: lastBonusId(s), counter, bells: Math.max(0, Math.floor(bells)), src, at });
+
+/** 途中保存。bells を渡すと「この当選間G時点のベル累計」として観測を追加（過去の観測は保持） */
+export function setMid(s: Session, games: number | null, at = new Date().toISOString(), bells?: number | null): Session {
+  const bellObs = games != null && bells != null ? [...(s.bellObs ?? []), point(s, games, bells, 'mid', at)] : s.bellObs ?? [];
+  return touch({ ...s, midGames: games, midAt: games == null ? null : at, bellObs });
 }
-/** ベル累計を入力（外部カウンター値。加算せず置き換え）。次のボーナス登録時にその当選へ記録される */
-export function setBellTotal(s: Session, n: number | null): Session {
-  return touch({ ...s, bellTotal: n == null ? null : Math.max(0, Math.floor(n)), bellPending: n != null });
+
+/**
+ * 実戦終了（初回・修正とも）。ヤメG時点の終了時ベルは bells で指定（null＝未記録）。
+ * 既存の終了時ベルは置き換える（修正画面で「そのまま使う」を選んだ場合は呼び出し側が同じ値を渡す）。
+ */
+export function endSession(s: Session, endGames: number, at = new Date().toISOString(), bells: number | null = null): Session {
+  const keep = (s.bellObs ?? []).filter((p) => p.src !== 'end');
+  const bellObs = bells != null ? [...keep, point(s, endGames, bells, 'end', s.endedAt ?? at)] : keep;
+  return touch({ ...s, endGames, endedAt: s.endedAt ?? at, midGames: null, midAt: null, bellObs });
 }
-export function endSession(s: Session, endGames: number, at = new Date().toISOString()): Session {
-  return touch({ ...s, endGames, endedAt: at, midGames: null, midAt: null });
-}
+/** 終了時のベル観測（あれば） */
+export const endBellPoint = (s: Session): BellPoint | null => (s.bellObs ?? []).find((p) => p.src === 'end') ?? null;
+
+/** 実戦を再開。終了時ベルは「その時点の観測」として途中保存扱いで残す */
 export function reopenSession(s: Session): Session {
-  return touch({ ...s, endGames: null, endedAt: null });
+  const bellObs = (s.bellObs ?? []).map((p) => (p.src === 'end' ? { ...p, src: 'mid' as const } : p));
+  return touch({ ...s, endGames: null, endedAt: null, bellObs });
 }
+
+/** ヤメ（または途中保存）の当選間Gを入力したときの台累計Gと自分の実戦G。着席時を下回るなら error */
+export function previewEnd(s: Session, counter: number): { total: number; my: number; error: string | null } {
+  const rows = rawRows(s);
+  const base = rows.length ? rows[rows.length - 1].cum : s.seatTotalGames;
+  const add = rows.length ? counter : counter - s.seatCurrentGames;
+  const total = base + add;
+  const error = add < 0
+    ? `着席時の当選間G（${s.seatCurrentGames}G）より小さい値です。ヤメ時は着席時以上の値になります`
+    : null;
+  return { total, my: total - s.seatTotalGames, error };
+}
+
+/** 終了・途中保存の位置（台累計G）。checkBellAt と組み合わせて矛盾を検出する */
+export const tailX = (s: Session, counter: number): number => previewEnd(s, counter).total;
 
 // ---------- 表示用 ----------
 export const suikaText = (v: SuikaValue): string => (v === null ? '未記録' : v === NA ? '-' : v === 3 ? '3+' : String(v));
@@ -403,6 +538,14 @@ const fmtDate = (d: string) => d.replace(/-/g, '/');
 const used = (f: FieldSpec) => f.support !== 'not_applicable';
 const nt = (f: FieldSpec) => (f.support === 'unverified' ? '（機種仕様未確認）' : '');
 
+/** 簡易共有のベル表記：未記録／0回(—)／876(1/6.91)／368(1/7.32・2,695G時点まで) */
+function simpleBell(s: Session): string {
+  const b = bellSummary(s);
+  if (!b.obs) return '未記録';
+  if (b.obs.bells === 0) return '0回(—)';
+  return `${b.obs.bells}(${b.ratio}${b.scope ? `・自分${b.obs.my.toLocaleString('ja-JP')}G時点まで` : ''})`;
+}
+
 export function shareSimple(s: Session): string {
   const m = getMachine(s.machineId);
   const a = aggregate(s);
@@ -416,7 +559,7 @@ export function shareSimple(s: Session): string {
     `台番：${s.tableNo || '未入力'}`,
     `機種：${m.short}`,
     '',
-    `累計${a.total}G｜B${a.big}/R${a.reg}｜🔔${a.bells}${a.bellRatio ? `(${probText(a.bellRatio)})` : ''}` +
+    `累計${a.total}G｜B${a.big}/R${a.reg}｜🔔${simpleBell(s)}` +
       (suika.length ? `｜🍉${suika.join('/')}` : '') + (unrec.length ? `（🍉未記録${unrec.join('/')}）` : ''),
     '',
   ];
@@ -461,7 +604,7 @@ export function shareDetail(s: Session): string {
     '■集計',
     `累計${a.total}G（うち自分の実戦${a.myGames}G）`,
     `BIG${a.big}（自分${a.myBig}）・REG${a.reg}（自分${a.myReg}）`,
-    `ベル累計：${a.bells}回（${probText(a.bellRatio)}、ベル累計が分かっている時点までのGで計算）`,
+    `ベル累計：${a.bell.count}（累計確率${a.bell.ratio}${a.bell.obs ? `＝自分の実戦${a.bell.obs.my.toLocaleString('ja-JP')}G÷${a.bell.obs.bells}回、最後にベルを実測した時点（${a.bell.obs.label}・${bellKindText(a.bell.obs)}）まで` : ''}）`,
   ];
   if (used(m.big.suika)) lines.push(`${m.big.suika.label}${nt(m.big.suika)}：${sa(a.bigSuika)}`);
   if (used(m.reg.suika)) lines.push(`${m.reg.suika.label}${nt(m.reg.suika)}：${sa(a.regSuika)}`);
@@ -495,15 +638,22 @@ export function shareDetail(s: Session): string {
     }),
   );
   const bt = bellTail(s);
+  const tailBells = bt.obs && (bt.obs.kind === 'end' ? s.endGames != null : true) && bt.obs.x === a.total ? bt : null;
   const tailRow = (label: string, at: string | null, g: number) =>
-    `${label}|${hhmm(at)}|-|${g}|${a.total}|${s.bellPending ? s.bellTotal : '未記録'}|${bt.diff ?? '-'}|${probText(bt.ratio)}|-|-|-|-|-|-|-|`;
+    `${label}|${hhmm(at)}|-|${g}|${a.total}|${tailBells ? tailBells.obs!.bells : '未記録'}|${tailBells?.diff ?? '-'}|${probText(tailBells?.ratio ?? null)}|-|-|-|-|-|-|-|`;
   if (s.endGames != null) lines.push(tailRow('ヤメ', s.endedAt, s.endGames));
   else if (s.midGames != null) lines.push(tailRow('途中', s.midAt, s.midGames));
+  const obsList = bellObservations(s);
+  lines.push('', '■ベル観測記録（自分の実戦G時点とセット）', 'No|種類|地点|台累計G|自分の実戦G|ベル累計|累計確率');
+  if (obsList.length === 0) lines.push('（ベル未記録）');
+  obsList.forEach((o, k) => lines.push([k + 1, bellKindText(o), o.label, o.x, o.my, o.bells, probText2(ratio(o.my, o.bells))].join('|')));
+  const issues = sessionIssues(s);
+  if (issues.length) lines.push('', '■要確認（値は変更していません）', ...issues.map((t) => `・${t}`));
   if (s.memo) lines.push('', `メモ：${s.memo}`);
   lines.push(
     '',
     '■凡例',
-    'サイド＝BIGは後半サイド、REGはREG中サイド／未記録＝観測・入力なし／ミス＝ビタ押しミス等で判別不可／0＝0回を確認／-＝機種の記録対象外／🍉3+＝3回以上（集計は3として加算）／ベル累計＝外部カウンター値／ボーナス間ベル＝前回ベル累計からの差分（(2区間)等は途中にベル累計未入力の当選を含む）',
+    'サイド＝BIGは後半サイド、REGはREG中サイド／未記録＝観測・入力なし／ミス＝ビタ押しミス等で判別不可／0＝0回を確認／-＝機種の記録対象外／🍉3+＝3回以上（集計は3として加算）／ベル累計＝外部カウンター値／ボーナス間ベル＝直前のベル観測からの差分（(2区間)等は途中にベル未記録の当選を含む、(途中保存から)は途中保存時点からの差分）／累計ベル確率は最後にベルを実測した時点までの自分の実戦Gで計算',
     `🤍白 🟦青 🟡黄 🟢緑 🟥赤 🟣紫 🌈虹 ${MISS_EMOJI}ミス`,
   );
   return lines.join('\n');
@@ -531,6 +681,7 @@ export function normalizeSession(raw: any): Session {
         .map((b: any) => ({
           id: typeof b.id === 'string' ? b.id : uid(),
           type: b.type, games: b.games, bellsAt: numN(b.bellsAt), _oldBells: numN(b.bells),
+          ...(b.bellsSrc === 'bonus' || b.bellsSrc === 'late' ? { bellsSrc: b.bellsSrc } : {}),
           at: typeof b.at === 'string' ? b.at : new Date(0).toISOString(),
           suika: isSuika(b.suika) ? b.suika : null,
           side: isLamp(b.side) ? b.side : null,
@@ -563,15 +714,38 @@ export function normalizeSession(raw: any): Session {
 }
 
 /**
- * ベルの旧形式を累計方式へ移行。
- * v1：session.bells＝累計 → bellTotal。v2：bonus.bells＝区間ベル・curBells＝現在区間 → 累計に積み上げ。
+ * ベル記録の読込・旧形式からの移行。値は捏造せず、元の値は legacy に保持する。
+ *  - 現行形式（bellObs）はそのまま検証して読む。
+ *  - 旧形式の「最新ベル累計＋未記録フラグ（bellTotal/bellPending）」は時点を持たないため：
+ *      途中保存G（midGames）が残っていればその時点の観測、
+ *      終了済み（endGames）なら「ヤメG時点の終了時ベル」として移行（2026-11-18 ユーザー確認済みの移行ルール。migrated で区別）、
+ *      どちらも無ければ時点不明として legacyBell（確率計算に使わず要確認表示）。
+ *  - v2（区間ベル bonus.bells / curBells）は累計に積み上げてから同じ扱い。v1（session.bells）も同様。
  */
-function migrateBells(raw: any, bonuses: any[]): { bellTotal: number | null; bellPending: boolean } {
-  if ('bellTotal' in (raw ?? {}) || 'bellPending' in (raw ?? {})) {
-    return { bellTotal: numN(raw.bellTotal), bellPending: raw.bellPending === true && numN(raw.bellTotal) != null };
+function migrateBells(raw: any, bonuses: any[]): Pick<Session, 'bellObs' | 'legacyBell'> & { legacy?: Record<string, unknown> } {
+  const lastId: string | null = bonuses.length ? bonuses[bonuses.length - 1].id : null;
+  const ids = new Set(bonuses.map((b) => b.id));
+  if (Array.isArray(raw?.bellObs)) {
+    const bellObs: BellPoint[] = raw.bellObs
+      .filter((p: any) => p && numN(p.counter) != null && numN(p.bells) != null && (p.src === 'mid' || p.src === 'end'))
+      .map((p: any) => ({
+        id: typeof p.id === 'string' ? p.id : uid(),
+        after: typeof p.after === 'string' && ids.has(p.after) ? p.after : typeof p.after === 'string' ? p.after : null,
+        counter: p.counter, bells: p.bells, src: p.src, at: typeof p.at === 'string' ? p.at : new Date(0).toISOString(),
+        ...(p.migrated === true ? { migrated: true } : {}),
+      }));
+    const lb = raw?.legacyBell && numN(raw.legacyBell.bells) != null ? { bells: raw.legacyBell.bells, reason: String(raw.legacyBell.reason ?? '時点不明') } : null;
+    return { bellObs, legacyBell: lb, ...(raw?.legacy && typeof raw.legacy === 'object' ? { legacy: raw.legacy } : {}) };
   }
-  const hasInterval = bonuses.some((b) => b._oldBells != null) || numN(raw?.curBells) != null;
-  if (hasInterval) {
+  // ---- 旧形式 ----
+  const legacy: Record<string, unknown> = {};
+  for (const k of ['bellTotal', 'bellPending', 'bells', 'bellsBase', 'curBells']) if (raw && k in raw) legacy[k] = raw[k];
+  let total: number | null = null;
+  let pending = false;
+  if ('bellTotal' in (raw ?? {}) || 'bellPending' in (raw ?? {})) {
+    total = numN(raw.bellTotal);
+    pending = raw.bellPending === true && total != null;
+  } else if (bonuses.some((b) => b._oldBells != null) || numN(raw?.curBells) != null) {
     let acc = numN(raw?.bellsBase) ?? 0;
     let complete = true;
     for (const b of bonuses) {
@@ -580,10 +754,27 @@ function migrateBells(raw: any, bonuses: any[]): { bellTotal: number | null; bel
       if (complete) b.bellsAt = acc; // 未入力区間があると以降の累計は確定できないので記録しない
     }
     const cur = numN(raw?.curBells);
-    return { bellTotal: complete && cur != null ? acc + cur : complete ? acc : null, bellPending: complete && cur != null };
+    total = complete ? (cur != null ? acc + cur : acc) : null;
+    pending = complete && cur != null;
+  } else {
+    total = numN(raw?.bells) ?? numN(raw?.bellsBase);
+    pending = total != null && !bonuses.some((b) => b.bellsAt != null);
   }
-  const old = numN(raw?.bells) ?? numN(raw?.bellsBase);
-  return { bellTotal: old, bellPending: false };
+  const out: Pick<Session, 'bellObs' | 'legacyBell'> & { legacy?: Record<string, unknown> } = {
+    bellObs: [], legacyBell: null, ...(Object.keys(legacy).length ? { legacy } : {}),
+  };
+  if (!pending || total == null) return out;
+  const mid = numN(raw?.midGames);
+  const end = numN(raw?.endGames);
+  const at = typeof raw?.endedAt === 'string' ? raw.endedAt : typeof raw?.midAt === 'string' ? raw.midAt : new Date(0).toISOString();
+  if (mid != null) {
+    out.bellObs.push({ id: uid(), after: lastId, counter: mid, bells: total, src: 'mid', at, migrated: true });
+  } else if (end != null) {
+    out.bellObs.push({ id: uid(), after: lastId, counter: end, bells: total, src: 'end', at, migrated: true });
+  } else {
+    out.legacyBell = { bells: total, reason: '旧データ：当選・途中保存・終了のどの時点の値か記録されていない' };
+  }
+  return out;
 }
 
 export function normalizePrefs(raw: any): Prefs {

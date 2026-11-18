@@ -4,7 +4,7 @@ import {
 } from './machines';
 import {
   addBonus, aggregate, canAskGakkun, deleteBonus, endSession, exportBackup, hhmm, isComplete, isFreshMachine,
-  isResetFlashTarget, newSession, parseBackup, probText, reopenSession, setBonusType, setBellTotal, setMid, shareDetail, bellTail, diffText, bellTarget, setBonusBells, setBgm, rfText,
+  isResetFlashTarget, newSession, parseBackup, probText, reopenSession, setBonusType, setMid, shareDetail, bellTail, diffText, bellTarget, setBonusBells, setBgm, rfText, checkBellAt, previewEnd, probText2, bellKindText, bellSummary, sessionIssues, endBellPoint, bellObservations, ratio as ratioFn, totalGames,
   shareSimple, specOf, timeline, updateBonus, type TimelineRow,
 } from './logic';
 import { buildSample } from './sample';
@@ -174,7 +174,11 @@ export default function App() {
       setField('g');
       return showToast(bellNum != null ? '当選間Gが空です（ベル欄にだけ入力されています）' : `先に当選間G数を入力してください（${type}）`, false);
     }
-    const bells = bellNum ?? (session.bellPending ? session.bellTotal : null);
+    const bells = bellNum;
+    if (bells != null) {
+      const err = checkBellAt(session, previewEnd(session, gNum).total, bells);
+      if (err) { setField('bell'); return showToast(`ベル累計${bells}回：${err}。ベル欄を確認してください`, false); }
+    }
     const label = `${type} ${gNum}G${bells != null ? `・🔔${bells}` : ''} 登録`;
     updateActive((s) => addBonus(s, type, gNum, undefined, bellNum), label);
     setGBuf('');
@@ -185,18 +189,24 @@ export default function App() {
   const saveMid = () => {
     if (!session) return;
     if (gNum == null) return showToast('現在のG数を入力してから途中保存', false);
-    updateActive((s) => {
-      const x = setMid(s, gNum);
-      return bellNum != null ? setBellTotal(x, bellNum) : x;
-    }, `現在${gNum}G${bellNum != null ? `・🔔${bellNum}` : ''} 途中保存`);
+    const pv = previewEnd(session, gNum);
+    if (pv.error) return showToast(pv.error, false);
+    if (bellNum != null) {
+      const err = checkBellAt(session, pv.total, bellNum);
+      if (err) { setField('bell'); return showToast(`ベル累計${bellNum}回：${err}。ベル欄を確認してください`, false); }
+    }
+    updateActive((s) => setMid(s, gNum, undefined, bellNum), `現在${gNum}G${bellNum != null ? `・🔔${bellNum}（この時点の値）` : ''} 途中保存`);
     setGBuf('');
     setBellBuf('');
     setField('g');
   };
   /** 当選後のベル後入力（順番自由） */
   const saveBellFor = () => {
-    if (!bellFor) return;
+    if (!bellFor || !session) return;
     if (bellNum == null) { setField('bell'); return showToast('ベル累計を入力してから「記録」', false); }
+    const bx = timeline(session).find((r) => r.bonus.id === bellFor.id)?.cumTotal ?? 0;
+    const berr = checkBellAt(session, bx, bellNum, { bonusId: bellFor.id });
+    if (berr) return showToast(`ベル累計${bellNum}回：${berr}`, false);
     updateActive((s) => setBonusBells(s, bellFor.id, bellNum), `${bellFor.type} ${bellFor.games}G のベル累計 ${bellNum}`);
     setBellBuf('');
     setField('g');
@@ -323,7 +333,7 @@ export default function App() {
                 setValue={(v) => (field === 'g' ? setGBuf(v) : setBellBuf(v))}
                 onMid={saveMid}
                 bellMode={!!bellFor}
-                pendingBell={session.bellPending ? session.bellTotal : null}
+                pendingBell={null}
               />
               <div className="bonusRow">
                 <button className="bigBtn" onClick={() => regBonus('BIG')}>BIG</button>
@@ -401,11 +411,11 @@ export default function App() {
           s={session}
           initial={gBuf}
           onClose={() => setSheet(null)}
-          onEnd={(g, payout) => {
+          onEnd={(g, bells, payout) => {
             const st = stateRef.current!;
             const id = session.id;
             if (session.endGames != null) {
-              updateActive((s) => ({ ...endSession(s, g, s.endedAt ?? undefined), payout: payout ?? s.payout }), `ヤメGを${g}Gに修正`);
+              updateActive((s) => ({ ...endSession(s, g, s.endedAt ?? undefined, bells), payout: payout ?? s.payout }), `終了データを修正（ヤメ${g}G・ベル${bells ?? '未記録'}）`);
               setSheet(null);
               return;
             }
@@ -413,7 +423,7 @@ export default function App() {
             commit(
               {
                 ...st,
-                sessions: st.sessions.map((s) => (s.id === id ? { ...endSession(s, g), payout: payout ?? s.payout } : s)),
+                sessions: st.sessions.map((s) => (s.id === id ? { ...endSession(s, g, undefined, bells), payout: payout ?? s.payout } : s)),
                 activeId: st.activeId === id ? null : st.activeId,
               },
               `${g}Gで実戦終了・保存しました`,
@@ -471,7 +481,7 @@ function Home(p: {
     return (
       <>
         <b>{s.date.replace(/-/g, '/')} {s.store || '店舗未入力'} 台{s.tableNo || '―'}</b>
-        <span>{getMachine(s.machineId).short}｜{a.total.toLocaleString()}G｜B{a.big}/R{a.reg}｜🔔{a.bells}</span>
+        <span>{getMachine(s.machineId).short}｜{a.total.toLocaleString()}G｜B{a.big}/R{a.reg}｜🔔{a.bell.count} {a.bell.ratio}</span>
       </>
     );
   };
@@ -533,9 +543,9 @@ function Header({ s, onEdit, onHome }: { s: Session; onEdit: () => void; onHome:
         {s.endGames != null && <span className="endTag">終了</span>}
       </div>
       <div className="stats">
-        <div><small>累計</small><b>{a.total.toLocaleString()}</b><i>G</i></div>
-        <div className="sb"><small>BIG</small><b>{a.big}</b></div>
-        <div className="sr"><small>REG</small><b>{a.reg}</b></div>
+        <div><small>台累計</small><b>{a.total.toLocaleString()}</b><i>G</i><em>自分 {a.myGames.toLocaleString()}G</em></div>
+        <div className="sb"><small>台BIG</small><b>{a.big}</b><em>自分 {a.myBig}</em></div>
+        <div className="sr"><small>台REG</small><b>{a.reg}</b><em>自分 {a.myReg}</em></div>
         <div><small>{s.endGames != null ? 'ヤメ' : '現在'}</small><b>{a.counter}</b><i>G</i></div>
       </div>
     </header>
@@ -571,12 +581,19 @@ function History({ s, onOpen, onTail }: { s: Session; onOpen: (id: string) => vo
   const rows = useMemo(() => timeline(s).reverse(), [s]);
   const m = getMachine(s.machineId);
   const autoMap = useMemo(() => computeRetro(s, m), [s, m]);
+  const issues = useMemo(() => sessionIssues(s), [s]);
   const a = aggregate(s);
   return (
     <section className="hist">
       <div className="hrow hh">
         <span>当選G</span><span>種別</span><span>判別・🔔ボーナス間ベル ✎</span><span>累計G</span>
       </div>
+      {issues.length > 0 && (
+        <details className="issues">
+          <summary>⚠ 要確認 {issues.length}件（値は変更していません・タップで表示）</summary>
+          <ul>{issues.map((t, k) => <li key={k}>{t}</li>)}</ul>
+        </details>
+      )}
       {(s.midGames != null || s.endGames != null) && (
         <button className="hrow cur" onClick={onTail}>
           <span className="g">{s.endGames ?? s.midGames}</span>
@@ -610,14 +627,16 @@ function History({ s, onOpen, onTail }: { s: Session; onOpen: (id: string) => vo
 }
 
 function rowBellText(r: TimelineRow): string {
-  if (r.bonus.bellsAt == null) return '🔔累計未入力';
-  if (r.bellDiff == null) return `🔔累計${r.bonus.bellsAt}`;
-  return `🔔+${r.bellDiff}${r.bellSpan > 1 ? `(${r.bellSpan}区間)` : ''}　${probText(r.bellRatio)}　累計${r.bonus.bellsAt}`;
+  if (r.bonus.bellsAt == null) return '🔔ベル未記録';
+  const late = r.bonus.bellsSrc === 'late' ? '（後入力）' : '';
+  if (r.bellDiff == null) return `🔔累計${r.bonus.bellsAt}${late}`;
+  return `🔔+${diffText(r)}　${probText(r.bellRatio)}　累計${r.bonus.bellsAt}${late}`;
 }
 function tailBellText(s: Session): string {
-  if (!s.bellPending || s.bellTotal == null) return '🔔累計未入力';
   const t = bellTail(s);
-  return `🔔+${t.diff}　${probText(t.ratio)}　累計${s.bellTotal}`;
+  if (!t.obs) return '🔔ベル未記録';
+  const here = t.obs.x === totalGames(s) ? '' : `（自分${t.obs.my.toLocaleString()}G時点）`;
+  return `🔔+${t.diff}　${probText(t.ratio)}　累計${t.obs.bells}${here}`;
 }
 
 function Keypad(p: {
@@ -656,22 +675,18 @@ function Keypad(p: {
 }
 
 function BellRow({ s }: { s: Session }) {
-  const a = aggregate(s);
-  const t = bellTail(s);
+  const b = bellSummary(s);
   return (
     <div className="bellRow">
-      <div className={`bellNow ${s.bellPending ? 'pend' : ''}`}>
+      <div className="bellNow">
         <span>🔔 累計</span>
-        <b>{a.bells}</b>
-        <small>
-          {s.bellPending
-            ? `前回記録から+${t.diff ?? 0}・次の当選に記録`
-            : 'ベル欄に入力 → BIG・REGで一緒に記録'}
-        </small>
+        <b>{b.count}</b>
+        <small>{b.obs ? `最終実測：${b.obs.label}（自分${b.obs.my.toLocaleString()}G時点）` : 'ベル欄に入力 → BIG・REG・途中保存で一緒に記録'}</small>
       </div>
       <div className="bellTot">
-        <small>全体</small>
-        <b>{probText(a.bellRatio)}</b>
+        <small>累計確率</small>
+        <b>{b.ratio}</b>
+        {b.scope && <small>{b.scope}</small>}
       </div>
     </div>
   );
@@ -757,6 +772,7 @@ function BonusSheet(p: {
   const [delArm, setDelArm] = useState(false);
   const [games, setGames] = useState(b ? String(b.games) : '');
   const [bells, setBells] = useState(b?.bellsAt != null ? String(b.bellsAt) : '');
+  const [bellErr, setBellErr] = useState<string | null>(null);
   const [memo, setMemo] = useState(b?.memo ?? '');
 
   // 未完了→完了になった瞬間に自動で閉じる（入力完了後は自動的に戻る）
@@ -788,7 +804,13 @@ function BonusSheet(p: {
   const commitBells = () => {
     const n = parseNum(bells);
     const v = n == null || n < 0 ? null : n;
-    if (v !== b.bellsAt) p.onPatch({ bellsAt: v }, 'ベル累計修正');
+    if (v === b.bellsAt) { setBellErr(null); return; }
+    if (v != null) {
+      const err = checkBellAt(p.s, row!.cumTotal, v, { bonusId: b.id });
+      if (err) { setBellErr(`${v}回は${err}。値を確認してください（保存していません）`); return; }
+    }
+    setBellErr(null);
+    p.onPatch(v == null ? { bellsAt: null, bellsSrc: undefined } : { bellsAt: v, bellsSrc: b.bellsAt == null ? 'late' : b.bellsSrc ?? 'bonus' }, 'ベル累計修正');
   };
   const setTime = (t: string) => {
     const [h, mi] = t.split(':').map(Number);
@@ -819,7 +841,7 @@ function BonusSheet(p: {
         <label>当選G
           <input inputMode="numeric" pattern="[0-9]*" value={games} onChange={(e) => setGames(e.target.value)} onBlur={commitGames} />
         </label>
-        <label>ベル累計
+        <label>当選時ベル累計
           <input inputMode="numeric" pattern="[0-9]*" value={bells} placeholder="未入力" onChange={(e) => setBells(e.target.value)} onBlur={commitBells} />
         </label>
         <label>時刻
@@ -827,7 +849,7 @@ function BonusSheet(p: {
         </label>
       </div>
       <p className="hint bd">
-        ボーナス間ベル：{row.bellDiff == null ? 'ベル累計未入力' : `${diffText(row)}回・${probText(row.bellRatio)}（${row.bellGames}G）`}
+        {bellErr ? <span className="errTx">{bellErr}</span> : <>ボーナス間ベル：{row.bellDiff == null ? 'この当選時点のベル累計は未記録' : `${diffText(row)}回・${probText(row.bellRatio)}（${row.bellGames}G）`}</>}
       </p>
       <Seg<BonusType>
         value={b.type}
@@ -1046,35 +1068,65 @@ function InvestSheet({ s, onClose, onSave }: { s: Session; onClose: () => void; 
   );
 }
 
-function EndSheet({ s, initial, onClose, onEnd, onReopen }: { s: Session; initial: string; onClose: () => void; onEnd: (g: number, payout: number | null) => void; onReopen: () => void }) {
-  const [g, setG] = useState(initial || ns(s.endGames ?? s.midGames));
+function EndSheet({ s, initial, onClose, onEnd, onReopen }: {
+  s: Session; initial: string; onClose: () => void; onEnd: (g: number, bells: number | null, payout: number | null) => void; onReopen: () => void;
+}) {
+  const ended = s.endGames != null;
+  const endPt = endBellPoint(s);
+  // ヤメGは入力中の値（終了済みの修正なら保存済みの値）。終了時ベルは前回値を自動入力しない
+  const [g, setG] = useState(ended ? ns(s.endGames) : initial);
+  const [bells, setBells] = useState(ended && endPt ? String(endPt.bells) : '');
   const [payout, setPayout] = useState(ns(s.payout));
+  const [confirmKeep, setConfirmKeep] = useState(false);
   const n = parseNum(g);
+  const bn = parseNum(bells);
   const a = aggregate(s);
-  const base = timeline(s).slice(-1)[0]?.cumTotal ?? s.seatTotalGames;
-  const preview = n == null ? null : base + (s.bonuses.length ? n : n - s.seatCurrentGames);
+  const pv = n == null ? null : previewEnd(s, n);
+  const bellErr = pv && !pv.error && bn != null ? checkBellAt(s, pv.total, bn, endPt ? { pointId: endPt.id } : {}) : null;
+  // 参考：この終了より前の最後のベル観測（入力欄には入れない）
+  const before = bellObservations(s).filter((o) => !(endPt && o.pointId === endPt.id));
+  const ref = before[before.length - 1] ?? null;
+  // 終了済みの修正で、保存済みの終了時ベルを残したままヤメGを変える場合は確認が必要
+  const needKeepConfirm = ended && endPt != null && n != null && n !== s.endGames && bn === endPt.bells;
+  const blocked = n == null || !!pv?.error || !!bellErr || (needKeepConfirm && !confirmKeep);
   return (
     <Sheet
-      title={s.endGames != null ? '実戦終了済み' : '実戦終了'}
+      title={ended ? '終了データの修正' : '実戦終了'}
       onClose={onClose}
       foot={
         <>
-          {s.endGames != null && <button onClick={onReopen}>再開する</button>}
-          <button className="primary" disabled={n == null} onClick={() => n != null && onEnd(n, parseNum(payout))}>
-            {s.endGames != null ? 'ヤメGを修正' : '終了して保存'}
+          {ended && <button onClick={onReopen}>再開する</button>}
+          <button className="primary" disabled={blocked} onClick={() => n != null && !blocked && onEnd(n, bn, parseNum(payout))}>
+            {ended ? '修正を保存' : '終了して保存'}
           </button>
         </>
       }
     >
-      <div className="grid2">
-        <NumInput label="ヤメ時の当選間G" value={g} onChange={setG} suffix="G" />
-        <NumInput label="回収枚数（任意）" value={payout} onChange={setPayout} suffix="枚" />
+      <NumInput label="ヤメ時の当選間G（必須・台のデータカウンターの値）" value={g} onChange={(v) => { setG(v); setConfirmKeep(false); }} suffix="G" />
+      <NumInput label="終了時のベル累計（任意・着席から数えた回数）" value={bells} onChange={(v) => { setBells(v); setConfirmKeep(false); }} suffix="回" />
+      <NumInput label="回収枚数（任意）" value={payout} onChange={setPayout} suffix="枚" />
+      <div className="endCalc">
+        {pv == null ? (
+          <span>ヤメ時の当選間Gを入力してください</span>
+        ) : pv.error ? (
+          <span className="err">{pv.error}</span>
+        ) : (
+          <span>自分の実戦 <b>{pv.my.toLocaleString()}G</b>／台の累計 <b>{pv.total.toLocaleString()}G</b>／ヤメ <b>{n}G</b></span>
+        )}
+        <span>BIG{a.big}/REG{a.reg}（自分 BIG{a.myBig}/REG{a.myReg}）</span>
+        {pv && !pv.error && (bn == null
+          ? <span>終了時ベル：未記録（空欄のまま終了できます）</span>
+          : bellErr
+            ? <span className="err">ベル累計{bn}回：{bellErr}</span>
+            : <span>終了時ベル {bn}回 → 累計ベル確率 <b>{bn === 0 ? '—（0回）' : probText2(ratioFn(pv.my, bn))}</b>（自分の実戦{pv.my.toLocaleString()}G÷{bn}回）</span>)}
+        {ref && <span className="ref">参考：前回のベル観測 {ref.no ? `${ref.label}・${bellKindText(ref)}` : bellKindText(ref)}（自分{ref.my.toLocaleString()}G時点）{ref.bells}回{ref.my > 0 && ref.bells > 0 ? `（${probText2(ratioFn(ref.my, ref.bells))}）` : ''}</span>}
       </div>
-      <div className="calc">
-        最終ボーナス時点 {base.toLocaleString()}G ＋ {n ?? '―'}G ＝ <b>{preview == null ? '―' : preview.toLocaleString()}G</b>
-        <div>BIG{a.big}/REG{a.reg}・🔔累計{a.bells}（{probText(a.bellRatio)}）</div>
-        <div>ヤメ時のベル累計：{s.bellPending ? s.bellTotal : '未入力（入れる場合は閉じてテンキー→🔔=累計）'}</div>
-      </div>
+      {needKeepConfirm && (
+        <label className="chk">
+          <input type="checkbox" checked={confirmKeep} onChange={(e) => setConfirmKeep(e.target.checked)} />
+          <span>終了時ベル {endPt!.bells}回 は、修正後のヤメ {n}G 時点の値です（違う場合はベル欄を修正するか空欄にしてください）</span>
+        </label>
+      )}
     </Sheet>
   );
 }

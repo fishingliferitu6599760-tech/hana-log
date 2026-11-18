@@ -33,7 +33,6 @@ export function build1115(): Session {
       ri++;
     }
   });
-  s = { ...s, bellTotal: 404, bellPending: true };
-  return endSession(s, 254);
+  return endSession(s, 254, undefined, 404);
 }
 

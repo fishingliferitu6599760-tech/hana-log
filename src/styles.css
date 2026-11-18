@@ -292,3 +292,26 @@ h4 small { font-weight: 400; margin-left: 6px; }
 .bval small { color: var(--sub); margin-left: 4px; font-size: 10.5px; }
 .lmeta { font-size: 11px; color: var(--sub); padding: 6px 0 2px; }
 .tline { width: 100%; height: auto; display: block; }
+
+/* ベル時点対応・台累計/自分 */
+.stats div { flex-wrap: wrap; row-gap: 0; }
+.stats em { flex-basis: 100%; font-style: normal; font-size: 10px; color: #b9b9c4; line-height: 1.1; margin-top: -1px; }
+.bellTot small:last-child:not(:first-child) { font-size: 9px; }
+.issues { margin: 4px 0 2px; background: #2a2310; border: 1px solid #6b5a12; border-radius: 10px; padding: 6px 10px; font-size: 12px; color: #ffd27a; text-align: left; width: 100%; }
+.issues ul { margin: 4px 0 0; padding-left: 16px; color: #e8d9a8; }
+.issues li { margin: 2px 0; line-height: 1.4; }
+.endCalc { background: #0f0f12; border-radius: 12px; padding: 10px 12px; font-size: 13px; color: var(--sub); line-height: 1.7; display: flex; flex-direction: column; gap: 2px; }
+.endCalc b { color: var(--tx); font-size: 15px; }
+.endCalc .err { color: #ff6961; font-weight: 700; }
+.endCalc .ref { font-size: 11px; color: #8a8a95; }
+.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: #ffd27a; background: #2a2310; border-radius: 10px; padding: 8px 10px; }
+.chk input { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; }
+.errTx { color: #ff6961; font-weight: 700; }
+.cempty.small { padding: 10px 12px; font-size: 12px; }
+.wcmp { background: #121216; border-radius: 12px; padding: 4px 10px 8px; }
+.wcmp table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.wcmp th, .wcmp td { padding: 5px 4px; border-bottom: 1px solid #222228; text-align: right; vertical-align: top; }
+.wcmp th:first-child, .wcmp td:first-child { text-align: left; color: var(--sub); }
+.wcmp th { font-weight: 600; font-size: 12px; }
+.wcmp small { display: block; font-size: 10px; color: var(--sub); font-weight: 400; }
+.bellNow { height: auto; min-height: 52px; padding: 6px 12px; } .bellNow small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

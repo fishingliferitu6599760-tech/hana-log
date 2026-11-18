@@ -22,8 +22,10 @@ export interface Bonus {
   type: BonusType;
   /** 当選間ゲーム数（台の表示カウンター値） */
   games: number;
-  /** この当選時点のベル累計（外部カウンター値。null = 未入力） */
+  /** この当選時点のベル累計（外部カウンター値。null = 未記録、0 = 観測済みの0回） */
   bellsAt: number | null;
+  /** bellsAt の入力経路：当選時に一括入力／当選後に後入力 */
+  bellsSrc?: 'bonus' | 'late';
   /** 登録時刻 ISO */
   at: string;
   suika: SuikaValue;
@@ -38,6 +40,24 @@ export interface Bonus {
   /** リセットフラッシュ時のランプ色（任意。通常の終了ランプ集計には含めない） */
   rfLamp: LampColor | null;
   memo: string;
+}
+
+/**
+ * 当選間（途中保存・終了時）のベル観測。必ずG時点とセットで持つ。
+ * 位置＝after の当選の累計G ＋ counter（after=null は着席時：着席時総G − 着席時表示G ＋ counter）
+ */
+export interface BellPoint {
+  id: string;
+  /** 区間の起点となる当選のID（null＝着席時から最初の当選まで） */
+  after: string | null;
+  /** その区間の当選間G（台の表示カウンター値） */
+  counter: number;
+  /** その時点のベル累計（着席時0から） */
+  bells: number;
+  src: 'mid' | 'end';
+  at: string;
+  /** 旧データから移行した値（ユーザー確認のうえヤメ時点として確定） */
+  migrated?: boolean;
 }
 
 export interface Session {
@@ -62,10 +82,12 @@ export interface Session {
   medalsUsed: number | null;
   payout: number | null;
   finalBalance: number | null;
-  /** 最新のベル累計（🔔=累計で入力した値） */
-  bellTotal: number | null;
-  /** 最後の当選以降にベル累計が入力され、まだ当選に記録されていない */
-  bellPending: boolean;
+  /** 当選間のベル観測（途中保存・終了時）。当選時のベルは各 Bonus.bellsAt */
+  bellObs: BellPoint[];
+  /** 時点を確定できない旧データのベル値（確率計算には使わず「要確認」表示） */
+  legacyBell: { bells: number; reason: string } | null;
+  /** 旧形式から移行したときの元の値（原データ保持用） */
+  legacy?: Record<string, unknown>;
   bonuses: Bonus[]; // 当選順（古い→新しい）
   /** 途中保存：最終ボーナス後（または着席後）の表示カウンター値 */
   midGames: number | null;

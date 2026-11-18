@@ -56,6 +56,7 @@ export function buildSample(): Session {
   return newSession({
     date: '2026-10-25', store: 'タイホウ篭山', tableNo: '1625', machineId: 'new-king-v30',
     seatTotalGames: 0, seatCurrentGames: 0, seatBig: 0, seatReg: 0, lendRate: null,
-    bellTotal: 876, bellPending: true, bonuses, endGames: 284, endedAt: new Date(t + 284 * 4200).toISOString(), memo: SAMPLE_NOTE,
+    bonuses, endGames: 284, endedAt: new Date(t + 284 * 4200).toISOString(), memo: SAMPLE_NOTE,
+    bellObs: [{ id: 'end', after: bonuses[bonuses.length - 1].id, counter: 284, bells: 876, src: 'end', at: new Date(t + 284 * 4200).toISOString() }],
   });
 }

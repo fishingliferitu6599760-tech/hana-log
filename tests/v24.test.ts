@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import {
-  addBonus, aggregate, endSession, exportBackup, isComplete, newSession, normalizeSession, parseBackup, setBellTotal,
+  addBonus, aggregate, endSession, exportBackup, isComplete, newSession, normalizeSession, parseBackup,
   setBgm, shareDetail, timeline, totalBells, updateBonus, emptyPrefs,
 } from '../src/logic';
 import { getMachine } from '../src/machines';
@@ -136,7 +136,7 @@ describe('C. ベル累計・G数・BIG/REGの一括登録', () => {
     let s = addBonus(zero(), 'BIG', 160);
     s = updateBonus(s, s.bonuses[0].id, { bellsAt: 25 });
     expect(timeline(s)[0].bellDiff).toBe(25);
-    s = addBonus(setBellTotal(s, 40), 'BIG', 100); // 事前入力（従来方式）も維持
+    s = addBonus(s, 'BIG', 100, undefined, 40);
     expect(s.bonuses[1].bellsAt).toBe(40);
   });
 });
@@ -144,11 +144,11 @@ describe('C. ベル累計・G数・BIG/REGの一括登録', () => {
 describe('D/E. ホーム・台移動', () => {
   it('同じ店舗で次の台：日付・店舗・貸し枚数のみ引き継ぎ', () => {
     let prev = newSession({ date: '2026-11-08', store: 'タイホウ鳴海', lendRate: 47, machineId: 'star-30', tableNo: '805', seatTotalGames: 1200, cashInvest: 10000 });
-    prev = endSession(setBellTotal(addBonus(prev, 'BIG', 99), 50), 120);
+    prev = endSession(addBonus(prev, 'BIG', 99), 120, undefined, 50);
     const next = nextSessionSameStore(prev);
     expect([next.date, next.store, next.lendRate]).toEqual(['2026-11-08', 'タイホウ鳴海', 47]);
-    expect([next.machineId, next.tableNo, next.seatTotalGames, next.seatBig, next.cashInvest, next.bonuses.length, next.bellTotal])
-      .toEqual(['new-king-v30', '', 0, 0, null, 0, null]);
+    expect([next.machineId, next.tableNo, next.seatTotalGames, next.seatBig, next.cashInvest, next.bonuses.length, next.bellObs.length])
+      .toEqual(['new-king-v30', '', 0, 0, null, 0, 0]);
     expect(next.id).not.toBe(prev.id);
   });
   it('終了済み・中断中を区別', () => {

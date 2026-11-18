@@ -73,7 +73,7 @@ describe('11/15 検証データ', () => {
       expect(d).toContain(`${r.no}|`);
       expect(d).toContain(`|${r.bonus.type}|${r.bonus.games}|${r.cumTotal}|`);
     });
-    expect(shareSimple(s)).toContain('累計2949G｜B8/R10｜🔔404(1/7.3)');
+    expect(shareSimple(s)).toContain('累計2949G｜B8/R10｜🔔404(1/7.30)');
     expect(shareSimple(s)).toContain('REG中サイド：🟦4🟡5🟢0🟥1🌈0');
   });
 });
