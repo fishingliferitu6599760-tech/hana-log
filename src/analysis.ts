@@ -111,7 +111,7 @@ export function suikaSeries(s: Session): { pts: SuikaPt[]; support: FieldSpec['s
 }
 
 // ---------- D. ランプ示唆（色別回数・割合・出現時点） ----------
-export type LampKey = 'regSide' | 'bigEnd' | 'regEnd';
+export type LampKey = 'bigSide' | 'regSide' | 'bigEnd' | 'regEnd';
 export interface LampEvent { x: number; no: number; value: LampColor | typeof MISS }
 export interface LampStat {
   key: LampKey;
@@ -127,11 +127,23 @@ export interface LampStat {
   events: LampEvent[];
 }
 
+/**
+ * 詳細判別に出すランプ項目（機種の仕様に従う）。
+ * サイドランプは機種で記録する方だけ：ニューキングV＝BIG後半サイド、スター・キング・ドラゴン・ホウオウ＝REG中サイド。
+ */
+export function lampKeysFor(s: Session): LampKey[] {
+  const m = getMachine(s.machineId);
+  const side: LampKey[] = [];
+  if (m.big.side.support !== 'not_applicable') side.push('bigSide');
+  if (m.reg.side.support !== 'not_applicable') side.push('regSide');
+  return [...side, 'bigEnd', 'regEnd'];
+}
+
 export function lampStat(s: Session, key: LampKey): LampStat {
   const m = getMachine(s.machineId);
-  const spec = key === 'regSide' ? m.reg.side : key === 'bigEnd' ? m.big.end : m.reg.end;
-  const type: BonusType = key === 'bigEnd' ? 'BIG' : 'REG';
-  const field = key === 'regSide' ? 'side' : 'end';
+  const spec = key === 'bigSide' ? m.big.side : key === 'regSide' ? m.reg.side : key === 'bigEnd' ? m.big.end : m.reg.end;
+  const type: BonusType = key === 'bigSide' || key === 'bigEnd' ? 'BIG' : 'REG';
+  const field = key === 'bigSide' || key === 'regSide' ? 'side' : 'end';
   const rf = key === 'bigEnd' ? resetFlashBonusIds(s) : new Set<string>();
   const counts: Record<LampColor, number> = { white: 0, blue: 0, yellow: 0, green: 0, red: 0, purple: 0, rainbow: 0 };
   let observed = 0, miss = 0, unrecorded = 0, excluded = 0;

@@ -113,3 +113,33 @@ describe('欠損・修正・削除・データ不足', () => {
     expect(recentWindow(s, 1000)).toEqual({ from: 1949, to: 2949, big: 2, reg: 2 }); // 2107B・2317R・2393R・2695B
   });
 });
+
+describe('詳細判別のサイドランプは機種の仕様に従う', () => {
+  it('ニューキングV：BIG後半サイドを集計（REG中サイドは出さない）', async () => {
+    const { buildSample } = await import('../src/sample');
+    const { lampKeysFor } = await import('../src/analysis');
+    const s = buildSample();
+    expect(lampKeysFor(s)).toEqual(['bigSide', 'bigEnd', 'regEnd']);
+    const bs = lampStat(s, 'bigSide');
+    expect(bs.label).toBe('BIG後半サイドランプ');
+    expect(bs.colors).toEqual(['blue', 'yellow', 'green', 'red', 'rainbow']);
+    expect(bs.counts).toMatchObject({ blue: 6, yellow: 4, green: 3, red: 3, rainbow: 0 });
+    expect(bs.observed).toBe(16);
+    expect(bs.counts).toMatchObject(aggregate(s).bigSide.counts); // 共有テキストの集計と一致
+  });
+  it('ニューキングV：ミス・未記録は割合の分母に入れず別カウント、リセフラ除外はBIG後半サイドに影響しない', () => {
+    let s = newSession({ machineId: 'new-king-v30', resetFlash: true });
+    s = addBonus(addBonus(addBonus(s, 'BIG', 100), 'BIG', 200), 'BIG', 300);
+    s = updateBonus(s, s.bonuses[0].id, { side: 'blue' });
+    s = updateBonus(s, s.bonuses[1].id, { side: 'miss' });
+    const bs = lampStat(s, 'bigSide');
+    expect([bs.observed, bs.miss, bs.unrecorded, bs.excluded, bs.counts.blue]).toEqual([1, 1, 1, 0, 1]);
+  });
+  it('他のハナハナ（スター・キング・ドラゴン・ホウオウ）は従来どおりREG中サイド', async () => {
+    const { lampKeysFor } = await import('../src/analysis');
+    for (const id of ['star-30', 'king-30', 'dragon-30', 'houou-30']) {
+      expect(lampKeysFor(newSession({ machineId: id }))).toEqual(['regSide', 'bigEnd', 'regEnd']);
+    }
+    expect(lampStat(build1115(), 'regSide').counts).toMatchObject({ blue: 4, yellow: 5, green: 0, red: 1 });
+  });
+});

@@ -5,7 +5,7 @@
  */
 import { Component, useMemo, useState, type ReactNode } from 'react';
 import {
-  bellSegments, bellSeries, bonusSeries, combinedSeries, countsAt, lampStat, ratioOf, suikaSeries, supportComments, SUPPORT_NOTE, windowCompare,
+  bellSegments, bellSeries, bonusSeries, lampKeysFor, combinedSeries, countsAt, lampStat, ratioOf, suikaSeries, supportComments, SUPPORT_NOTE, windowCompare,
   type BellObs, type BellSegment, type WindowStat, type BonusSeries, type LampStat, type Pt, type SuikaPt,
 } from './analysis';
 import { aggregate } from './logic';
@@ -356,7 +356,7 @@ export function AnalysisView({ s, onClose }: { s: Session; onClose: () => void }
     const bs = bonusSeries(s);
     return {
       a: aggregate(s), bs, comb: combinedSeries(bs), bell: bellSeries(s), suika: suikaSeries(s), segs: bellSegments(s), wc: windowCompare(s),
-      lamps: (['regSide', 'bigEnd', 'regEnd'] as const).map((k) => lampStat(s, k)), comments: supportComments(s),
+      lamps: lampKeysFor(s).map((k) => lampStat(s, k)), comments: supportComments(s),
     };
   }, [s]);
   const { a, bs } = data;
